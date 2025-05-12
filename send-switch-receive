@@ -1,0 +1,402 @@
+/*
+ * This file is part of the µOS++ distribution.
+ *   (https://github.com/micro-os-plus)
+ * Copyright (c) 2014 Liviu Ionescu.
+ *
+ * Permission is hereby granted, free of charge, to any person
+ * obtaining a copy of this software and associated documentation
+ * files (the "Software"), to deal in the Software without
+ * restriction, including without limitation the rights to use,
+ * copy, modify, merge, publish, distribute, sublicense, and/or
+ * sell copies of the Software, and to permit persons to whom
+ * the Software is furnished to do so, subject to the following
+ * conditions:
+ *
+ * The above copyright notice and this permission notice shall be
+ * included in all copies or substantial portions of the Software.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+ * EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES
+ * OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
+ * NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT
+ * HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY,
+ * WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+ * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR
+ * OTHER DEALINGS IN THE SOFTWARE.
+ */
+
+// ----------------------------------------------------------------------------
+
+#include <stdio.h>
+#include <stdlib.h>
+#include "diag/trace.h"
+
+/* Kernel includes. */
+#include "FreeRTOS.h"
+#include "task.h"
+#include "queue.h"
+#include "timers.h"
+#include <string.h>
+#include "semphr.h"
+
+#define CCM_RAM __attribute__((section(".ccmram")))
+
+// ----------------------------------------------------------------------------
+
+#include "led.h"
+
+#define BLINK_PORT_NUMBER         (3)
+#define BLINK_PIN_NUMBER_GREEN    (12)
+#define BLINK_PIN_NUMBER_ORANGE   (13)
+#define BLINK_PIN_NUMBER_RED      (14)
+#define BLINK_PIN_NUMBER_BLUE     (15)
+#define BLINK_ACTIVE_LOW          (false)
+
+struct led blinkLeds[4];
+
+
+#define PACKET_FIXED_LEN 1000
+#define LINK_PROP_DELAY 200 // ms
+#define PACKET_GEN_INTERVAL 200 // ms
+#define TIMEOUT_PERIOD 700 // ms
+#define MAX_RETRIES 4
+#define P_DROP 0.01
+
+#define QUEUE_SIZE 200
+// ----------------------------------------------------------------------------
+/*-----------------------------------------------------------*/
+
+/*
+ * The LED timer callback function.  This does nothing but switch the red LED
+ * off.
+ */
+
+static void prvOneShotTimerCallback( TimerHandle_t xTimer );
+static void prvAutoReloadTimerCallback( TimerHandle_t xTimer );
+
+/*-----------------------------------------------------------*/
+
+/* The LED software timer.  This uses vLEDTimerCallback() as its callback
+ * function.
+ */
+static TimerHandle_t xTimer1 = NULL;
+static TimerHandle_t xTimer2 = NULL;
+BaseType_t xTimer1Started, xTimer2Started;
+
+/*-----------------------------------------------------------*/
+// ----------------------------------------------------------------------------
+//
+// Semihosting STM32F4 empty sample (trace via DEBUG).
+//
+// Trace support is enabled by adding the TRACE macro definition.
+// By default the trace messages are forwarded to the DEBUG output,
+// but can be rerouted to any device or completely suppressed, by
+// changing the definitions required in system/src/diag/trace-impl.c
+// (currently OS_USE_TRACE_ITM, OS_USE_TRACE_SEMIHOSTING_DEBUG/_STDOUT).
+//
+
+// ----- main() ---------------------------------------------------------------
+
+// Sample pragmas to cope with warnings. Please note the related line at
+// the end of this function, used to pop the compiler diagnostics status.
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wunused-parameter"
+#pragma GCC diagnostic ignored "-Wmissing-declarations"
+#pragma GCC diagnostic ignored "-Wreturn-type"
+
+
+
+
+
+typedef struct {
+    int32_t  from, to, message;
+    int32_t seq;
+    int16_t size , retries;
+} Packet;
+
+typedef struct {
+    int32_t expectedSeq;
+    int32_t received;
+    int32_t lost;
+} RxStats;
+
+
+static QueueHandle_t qToSwitch, qToRx3, qToRx4;
+static SemaphoreHandle_t stats_mutex;
+
+//static int32_t sent3_1 = 0, sent4_1 = 0, sent3_2 = 0, sent4_2 = 0 ;
+//static int32_t recv3 = 0, recv4 = 0, lost3 = 0, lost4 = 0, drop_count = 0;
+
+static void setupQueues(void) {
+    qToSwitch = xQueueCreate(QUEUE_SIZE, sizeof(Packet *));
+
+    qToRx3    = xQueueCreate(QUEUE_SIZE, sizeof(Packet *));
+    qToRx4    = xQueueCreate(QUEUE_SIZE, sizeof(Packet *));
+}
+
+
+void SenderTask( void *parameters )
+{
+	int32_t myId = ( int32_t ) parameters ;
+int32_t seq3 = 0, seq4 = 0;
+BaseType_t status;
+
+//const TickType_t senderticksToWait = pdMS_TO_TICKS( PACKET_GEN_INTERVAL);
+/* As per most tasks, this task is implemented within an infinite loop. */
+while(1){
+	  vTaskDelay(pdMS_TO_TICKS(PACKET_GEN_INTERVAL));
+ Packet *pkt = (Packet *)pvPortMalloc(sizeof(Packet));
+
+ if (!pkt) continue;
+ pkt->message = myId;
+         pkt->from = myId;
+         pkt->to = (rand() % 2 == 0) ? 3 : 4;
+         pkt->size = PACKET_FIXED_LEN;
+         pkt->retries = 0;
+         xSemaphoreTake(stats_mutex, portMAX_DELAY);
+                 if (pkt->to == 3) {
+                     pkt->seq = seq3++;
+                 } else {
+                     pkt->seq = seq4++;
+                 }
+                 xSemaphoreGive(stats_mutex);
+
+                 status = xQueueSend(qToSwitch, &pkt, 0);
+                 if (status == pdPASS) {
+                     printf("Sender: sent to switch: from=%d to=%d seq=%ld\n", pkt->from, pkt->to, pkt->seq);
+                 } else {
+                     printf("Could not send to the queue.\n");
+                     vPortFree(pkt); // avoid memory leak
+                 }
+             }
+         }
+
+void SwitchTask(void *params) {
+    Packet *pkt = NULL;
+    while (1) {
+        if (xQueueReceive(qToSwitch, &pkt, portMAX_DELAY) == pdPASS && pkt) {
+            printf("Switch: got from sender: from=%d to=%d seq=%ld\n", pkt->from, pkt->to, pkt->seq);
+
+            vTaskDelay(pdMS_TO_TICKS(LINK_PROP_DELAY)); // LINK_PROP_DELAY
+
+            // Drop with probability P_DROP
+            double drop_prob = P_DROP * pkt->size * 8;
+            if (((double)rand() / RAND_MAX) < drop_prob) {
+                xSemaphoreTake(stats_mutex, portMAX_DELAY);
+                pkt->retries++;
+                xSemaphoreGive(stats_mutex);
+
+                if (pkt->retries < MAX_RETRIES) {
+                    printf("Switch: retrying seq=%ld, retry=%d\n", pkt->seq, pkt->retries);
+                    xQueueSend(qToSwitch, &pkt, 0);
+                } else {
+                    printf("Switch: max retries exceeded, dropped from %d to %d seq=%ld\n", pkt->from, pkt->to, pkt->seq);
+                    vPortFree(pkt);
+                    continue;
+                }
+
+            }
+
+            // Forward to the correct receiver queue
+            if (pkt->to == 3) {
+               // printf("Switch: forwarding to qToRx3 seq=%ld, pkt=%p\n", pkt->seq);
+                xQueueSend(qToRx3, &pkt, 0);
+            } else if (pkt->to == 4) {
+               // printf("Switch: forwarding to qToRx4 seq=%ld, pkt=%p\n", pkt->seq);
+                xQueueSend(qToRx4, &pkt, 0);
+            } else {
+                //printf("Switch: bad destination, dropping pkt seq=%ld\n", pkt->seq);
+            	vPortFree(pkt);
+            }
+
+        }
+    }
+}
+
+
+void ReceiverTask(void *parameters) {
+    int32_t myId = (int32_t)parameters;
+    Packet *pkt = NULL;
+    BaseType_t status;
+    int32_t expectedSeq = 0;
+    const TickType_t ticksToWait = pdMS_TO_TICKS(TIMEOUT_PERIOD); // TIMEOUT_PERIOD
+
+    while (1) {
+        if (myId == 3) {
+            status = xQueueReceive(qToRx3, &pkt, ticksToWait);
+        } else {
+            status = xQueueReceive(qToRx4, &pkt, ticksToWait);
+        }
+
+        if (status == pdPASS ) {
+            if (pkt->seq != expectedSeq) {
+                // Print every lost sequence (if gap)
+                for (int32_t lostSeq = expectedSeq; lostSeq < pkt->seq; ++lostSeq) {
+                    printf("Packet lost at receiver.. %d: expected seq=%ld\n", myId, (long)lostSeq);
+
+                }
+            }
+            printf("Packet received: to=%d from=%d seq=%ld\n", pkt->to, pkt->from, (long)pkt->seq);
+            expectedSeq = pkt->seq + 1;
+
+            vPortFree(pkt);
+        } else {
+            // Timeout: lost the expectedSeq
+            printf("Packet lost at receiver %d: expected seq=%ld (timeout)\n", myId, (long)expectedSeq);
+            expectedSeq++;
+
+        }
+    }
+}
+
+
+
+
+
+
+
+
+
+
+
+
+int
+main(int argc, char* argv[])
+{
+	// Add your code here.
+
+	/*blinkLeds[0] = createLed(BLINK_PORT_NUMBER, BLINK_PIN_NUMBER_GREEN, BLINK_ACTIVE_LOW );
+	blinkLeds[1] = createLed(BLINK_PORT_NUMBER, BLINK_PIN_NUMBER_ORANGE, BLINK_ACTIVE_LOW );
+	blinkLeds[2] = createLed(BLINK_PORT_NUMBER, BLINK_PIN_NUMBER_RED, BLINK_ACTIVE_LOW );
+	blinkLeds[3] = createLed(BLINK_PORT_NUMBER, BLINK_PIN_NUMBER_BLUE, BLINK_ACTIVE_LOW );
+
+	for (int i=0; i<4; i++){
+		power_up(&blinkLeds[i]);
+	}*/
+
+	xTimer1 = xTimerCreate( "Timer1", ( pdMS_TO_TICKS(2000) ), pdFALSE, ( void * ) 0, prvOneShotTimerCallback);
+	xTimer2 = xTimerCreate( "Timer2", ( pdMS_TO_TICKS(TIMEOUT_PERIOD) ), pdTRUE, ( void * ) 1, prvAutoReloadTimerCallback);
+
+	if( ( xTimer1 != NULL ) && ( xTimer2 != NULL ) )
+	{
+		xTimer1Started = xTimerStart( xTimer1, 0 );
+		xTimer2Started = xTimerStart( xTimer2, 0 );
+	}
+
+	if( xTimer1Started == pdPASS && xTimer2Started == pdPASS)
+	{
+		BaseType_t status;
+		setupQueues();
+		stats_mutex = xSemaphoreCreateMutex();
+		status = xTaskCreate( SenderTask, "Sender1", 2048 /*stack*/,
+		( void * )1 /*param for sender*/, 1/*priority*/, NULL );
+
+		status = xTaskCreate( SenderTask, "Sender2", 2048, ( void * )2, 1, NULL );
+		/* Reader task created with prio 2 higher than sender tasks. */
+		status = xTaskCreate( ReceiverTask, "Receiver1", 2048, (void*)3, 2, NULL );
+		status = xTaskCreate( ReceiverTask, "Receiver2", 2048, (void*)4, 2, NULL );
+		status = xTaskCreate(SwitchTask, "Switch", 2048, NULL, 1, NULL);
+		/* Start the scheduler so the created tasks start executing. */
+
+
+		vTaskStartScheduler();
+	}
+
+	return 0;
+}
+
+#pragma GCC diagnostic pop
+
+// ----------------------------------------------------------------------------
+
+static void prvOneShotTimerCallback( TimerHandle_t xTimer )
+{
+
+	turn_on (&blinkLeds[1]);
+}
+
+static void prvAutoReloadTimerCallback( TimerHandle_t xTimer )
+{
+
+
+
+	if(isOn(blinkLeds[0])){
+		turn_off(&blinkLeds[0]);
+	} else {
+		turn_on(&blinkLeds[0]);
+	}
+}
+
+
+void vApplicationMallocFailedHook( void )
+{
+	/* Called if a call to pvPortMalloc() fails because there is insufficient
+	free memory available in the FreeRTOS heap.  pvPortMalloc() is called
+	internally by FreeRTOS API functions that create tasks, queues, software
+	timers, and semaphores.  The size of the FreeRTOS heap is set by the
+	configTOTAL_HEAP_SIZE configuration constant in FreeRTOSConfig.h. */
+	for( ;; );
+}
+/*-----------------------------------------------------------*/
+
+void vApplicationStackOverflowHook( TaskHandle_t pxTask, char *pcTaskName )
+{
+	( void ) pcTaskName;
+	( void ) pxTask;
+
+	/* Run time stack overflow checking is performed if
+	configconfigCHECK_FOR_STACK_OVERFLOW is defined to 1 or 2.  This hook
+	function is called if a stack overflow is detected. */
+	for( ;; );
+}
+/*-----------------------------------------------------------*/
+
+void vApplicationIdleHook( void )
+{
+volatile size_t xFreeStackSpace;
+
+	/* This function is called on each cycle of the idle task.  In this case it
+	does nothing useful, other than report the amout of FreeRTOS heap that
+	remains unallocated. */
+	xFreeStackSpace = xPortGetFreeHeapSize();
+
+	if( xFreeStackSpace > 100 )
+	{
+		/* By now, the kernel has allocated everything it is going to, so
+		if there is a lot of heap remaining unallocated then
+		the value of configTOTAL_HEAP_SIZE in FreeRTOSConfig.h can be
+		reduced accordingly. */
+	}
+}
+
+void vApplicationTickHook(void) {
+}
+
+StaticTask_t xIdleTaskTCB CCM_RAM;
+StackType_t uxIdleTaskStack[configMINIMAL_STACK_SIZE] CCM_RAM;
+
+void vApplicationGetIdleTaskMemory(StaticTask_t **ppxIdleTaskTCBBuffer, StackType_t **ppxIdleTaskStackBuffer, uint32_t *pulIdleTaskStackSize) {
+  /* Pass out a pointer to the StaticTask_t structure in which the Idle task's
+  state will be stored. */
+  *ppxIdleTaskTCBBuffer = &xIdleTaskTCB;
+
+  /* Pass out the array that will be used as the Idle task's stack. */
+  *ppxIdleTaskStackBuffer = uxIdleTaskStack;
+
+  /* Pass out the size of the array pointed to by *ppxIdleTaskStackBuffer.
+  Note that, as the array is necessarily of type StackType_t,
+  configMINIMAL_STACK_SIZE is specified in words, not bytes. */
+  *pulIdleTaskStackSize = configMINIMAL_STACK_SIZE;
+}
+
+static StaticTask_t xTimerTaskTCB CCM_RAM;
+static StackType_t uxTimerTaskStack[configTIMER_TASK_STACK_DEPTH] CCM_RAM;
+
+/* configUSE_STATIC_ALLOCATION and configUSE_TIMERS are both set to 1, so the
+application must provide an implementation of vApplicationGetTimerTaskMemory()
+to provide the memory that is used by the Timer service task. */
+void vApplicationGetTimerTaskMemory(StaticTask_t **ppxTimerTaskTCBBuffer, StackType_t **ppxTimerTaskStackBuffer, uint32_t *pulTimerTaskStackSize) {
+  *ppxTimerTaskTCBBuffer = &xTimerTaskTCB;
+  *ppxTimerTaskStackBuffer = uxTimerTaskStack;
+  *pulTimerTaskStackSize = configTIMER_TASK_STACK_DEPTH;
+}
