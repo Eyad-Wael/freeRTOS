@@ -111,7 +111,7 @@ BaseType_t xTimer1Started, xTimer2Started;
 typedef struct {
     int32_t  from, to, message;
     int32_t seq;
-    int16_t size , retries;
+    int16_t size = PACKET_FIXED_LEN , retries;
 } Packet;
 
 typedef struct {
@@ -171,48 +171,46 @@ while(1){
              }
          }
 
+
 void SwitchTask(void *params) {
-    Packet *pkt = NULL;
+    Packet *pktBuffer[QUEUE_SIZE];
+    int pktCount = 0;
+
+    TickType_t lastWakeTime = xTaskGetTickCount();
+
     while (1) {
-        if (xQueueReceive(qToSwitch, &pkt, portMAX_DELAY) == pdPASS && pkt) {
-            printf("Switch: got from sender: from=%d to=%d seq=%ld\n", pkt->from, pkt->to, pkt->seq);
+        // Collect all packets available in the queue before the next batch send
+        Packet *pkt = NULL;
+        while (xQueueReceive(qToSwitch, &pkt, 0) == pdPASS && pktCount < QUEUE_SIZE) {
+            pktBuffer[pktCount++] = pkt;
+        }
 
-            vTaskDelay(pdMS_TO_TICKS(LINK_PROP_DELAY)); // LINK_PROP_DELAY
+        // Wait until 200ms have passed since last batch
+        vTaskDelayUntil(&lastWakeTime, pdMS_TO_TICKS(200));
 
-            // Drop with probability P_DROP
+        // Send out all buffered packets
+        for (int i = 0; i < pktCount; ++i) {
+            pkt = pktBuffer[i];
+
+            // Apply drop probability per packet
             double drop_prob = P_DROP * pkt->size * 8;
             if (((double)rand() / RAND_MAX) < drop_prob) {
-                xSemaphoreTake(stats_mutex, portMAX_DELAY);
-                pkt->retries++;
-                xSemaphoreGive(stats_mutex);
-
-                if (pkt->retries < MAX_RETRIES) {
-                    printf("Switch: retrying seq=%ld, retry=%d\n", pkt->seq, pkt->retries);
-                    xQueueSend(qToSwitch, &pkt, 0);
-                } else {
-                    printf("Switch: max retries exceeded, dropped from %d to %d seq=%ld\n", pkt->from, pkt->to, pkt->seq);
-                    vPortFree(pkt);
-                    continue;
-                }
-
+                // Drop the packet (simulate loss)
+                vPortFree(pkt);
+                continue;
             }
 
-            // Forward to the correct receiver queue
             if (pkt->to == 3) {
-               // printf("Switch: forwarding to qToRx3 seq=%ld, pkt=%p\n", pkt->seq);
-                xQueueSend(qToRx3, &pkt, 0);
+                xQueueSendToBack(qToRx3, &pkt, 0);
             } else if (pkt->to == 4) {
-               // printf("Switch: forwarding to qToRx4 seq=%ld, pkt=%p\n", pkt->seq);
-                xQueueSend(qToRx4, &pkt, 0);
+                xQueueSendToBack(qToRx4, &pkt, 0);
             } else {
-                //printf("Switch: bad destination, dropping pkt seq=%ld\n", pkt->seq);
-            	vPortFree(pkt);
+                vPortFree(pkt); // Unknown destination
             }
-
         }
+        pktCount = 0; // Reset buffer
     }
 }
-
 
 void ReceiverTask(void *parameters) {
     int32_t myId = (int32_t)parameters;
