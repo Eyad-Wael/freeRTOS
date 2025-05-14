@@ -35,7 +35,7 @@ struct led blinkLeds[4];
 #define P_DROP_PERCENT 1    // because double doesnot work here so
 #define P_DROP_SCALE   100
 #define QUEUE_SIZE 200
-
+#define PACKET_DATA_LEN 32
 #define Max_num_of_packets  2000
 
 
@@ -86,6 +86,7 @@ typedef struct {
     int32_t from, to;
     int32_t seq;
     int16_t size, retries;
+    char data[PACKET_DATA_LEN];
 } Packet;
 
 static QueueHandle_t qToSwitch, qToRx3, qToRx4;
@@ -95,13 +96,31 @@ static SemaphoreHandle_t stats_mutex;
 static int32_t total_received = 0;
 static int32_t total_lost = 0;
 
+
+const char* message_pool[] = {
+    "eyad",
+    "abdelrahman",
+    "second year",
+    "embeded project",
+    "Dr.Khaled Fouad",
+    "cairo university"
+};
+#define MESSAGE_POOL_SIZE (sizeof(message_pool)/sizeof(message_pool[0]))
+
+void set_random_packet_data(Packet* pkt) {
+    if (!pkt) return;
+    int idx = rand() % MESSAGE_POOL_SIZE;
+    strncpy(pkt->data, message_pool[idx], PACKET_DATA_LEN - 1);
+    pkt->data[PACKET_DATA_LEN - 1] = '\0'; 
+}
+
 void print_final_stats(void) {
     int32_t total = total_received + total_lost;
     int32_t pct_int = 0, pct_frac = 0;
     if (total > 0) {
-        int32_t pct_times_100 = (10000 * total_lost) / total; // e.g. 1234 = 12.34%
-        pct_int = pct_times_100 / 100;
-        pct_frac = pct_times_100 % 100;
+        int32_t pct_percent = (10000 * total_lost) / total; // because double doesnot work here so we will split into 2 ints 
+        pct_int = pct_percent / 100;
+        pct_frac = pct_percent % 100;
     }
     printf("=== Simulation Complete ===\n");
     printf("Total received packets: %ld\n", (long)total_received);
@@ -110,17 +129,19 @@ void print_final_stats(void) {
 }
 
 void CheckAndReportStatsAndStop(void) {
-    static int stopped = 0;
+    
     int32_t total;
     int32_t MAX_num_of_packets = Max_num_of_packets ;
-    if (stopped) return;
+    
     xSemaphoreTake(stats_mutex, portMAX_DELAY);
     total = total_received + total_lost;
     xSemaphoreGive(stats_mutex);
-    if (total >= MAX_num_of_packets && !stopped) {
-        stopped = 1;
+    if (total >= MAX_num_of_packets ) {
+        
         print_final_stats();
-        while (1) vTaskDelay(portMAX_DELAY);//willnot work as freertos switchs tasks unifromly
+        while (1) vTaskDelay(portMAX_DELAY);//willnot work correctly as freertos switchs tasks unifromly
+    }else {
+return;
     }
 }
 
@@ -142,6 +163,7 @@ void SenderTimerCallback(TimerHandle_t xTimer) {
     pkt->to = (rand() % 2 == 0) ? 3 : 4;
     pkt->size = PACKET_FIXED_LEN;
     pkt->retries = 0;
+set_random_packet_data(pkt);
     xSemaphoreTake(stats_mutex, portMAX_DELAY);
     if (pkt->to == 3) {
         pkt->seq = state->seq3++;
@@ -151,7 +173,7 @@ void SenderTimerCallback(TimerHandle_t xTimer) {
     xSemaphoreGive(stats_mutex);
 
     if (xQueueSend(qToSwitch, &pkt, 0) == pdPASS) {
-        printf("Sender: sent to switch: from=%d to=%d seq=%ld\n", pkt->from, pkt->to, (long)pkt->seq);
+        printf("Sender: sent to switch: from=%d to=%d seq=%ld data=\"%s\"\n", pkt->from, pkt->to, (long)pkt->seq, pkt->data);
     } else {
         printf("Sender: Could not send to switch queue.\n");
         vPortFree(pkt);
@@ -163,7 +185,7 @@ void SenderTask(void *parameters) {
     TimerHandle_t timer = xTimerCreate(
         "SenderTimer",
         pdMS_TO_TICKS(PACKET_GEN_INTERVAL),
-        pdTRUE, // auto-reload
+        pdTRUE, 
         (void *)state,
         SenderTimerCallback
     );
@@ -259,7 +281,7 @@ void ReceiverTask(void *parameters) {
                     CheckAndReportStatsAndStop();
                 }
             }
-            printf("Packet received: to=%d from=%d seq=%ld\n", pkt->to, pkt->from, (long)pkt->seq);
+            printf("Packet received: to=%d from=%d seq=%ld data=\"%s\"\n", pkt->to, pkt->from, (long)pkt->seq, pkt->data);
             expectedSeq = pkt->seq + 1;
             vPortFree(pkt);
             xSemaphoreTake(stats_mutex, portMAX_DELAY);
