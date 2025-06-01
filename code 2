@@ -85,6 +85,7 @@ BaseType_t xTimer1Started, xTimer2Started;
 
 static bool rx3_seenSeq[MAX_PACKETS];
 static bool rx4_seenSeq[MAX_PACKETS];
+static volatile bool simulation_done = false;
 
 typedef struct {
     int32_t from, to;
@@ -156,6 +157,7 @@ void CheckAndReportStatsAndStop(void) {
 
     if (total >= NO_OF_PACKETS) {
         reported = true;
+        simulation_done = true;
         print_final_stats();
         xSemaphoreGive(stats_mutex);
         vTaskEndScheduler();
@@ -163,7 +165,6 @@ void CheckAndReportStatsAndStop(void) {
         xSemaphoreGive(stats_mutex);
     }
 }
-
 
 
 typedef struct {
@@ -175,6 +176,7 @@ typedef struct {
 static SenderState senderStates[2];
 
 void SenderTimerCallback(TimerHandle_t xTimer) {
+if (simulation_done) return;
     SenderState *state = (SenderState *)pvTimerGetTimerID(xTimer);
 
     Packet *pkt = (Packet *)pvPortMalloc(sizeof(Packet));
@@ -231,6 +233,7 @@ void SenderTask(void *parameters) {
 
 void SwitchForwardCallback(TimerHandle_t xTimer)
 {
+if (simulation_done) return;
     Packet *delayedPkt = (Packet *)pvTimerGetTimerID(xTimer);
 
     if (delayedPkt->to == 3) {
@@ -295,7 +298,7 @@ void ReceiverTask(void *parameters) {
     Packet *pkt = NULL;
     BaseType_t status;
     int32_t expectedSeq = 0;
- //   const TickType_t ticksToWait = pdMS_TO_TICKS(TIMEOUT_PERIOD);
+if (simulation_done) return;
 
     for (;;) {
      if (myId == 3) {
