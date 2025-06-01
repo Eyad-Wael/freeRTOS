@@ -5,6 +5,8 @@
 // ----------------------------------------------------------------------------
 
 
+
+
 #include <stdio.h>
 #include <stdlib.h>
 #include "diag/trace.h"
@@ -36,9 +38,9 @@
 #define PROP_DELAY_MS    5
 #define P_DROP_PERCENT 1    // because double doesnot work here so
 #define P_DROP_SCALE   100
-#define QUEUE_SIZE 2000
+#define QUEUE_SIZE 200
 #define PACKET_DATA_LEN 32
-#define NO_OF_PACKETS 200 // max no of recieved packets to print results
+#define NO_OF_PACKETS 2000 // max no of recieved packets to print results
 
 
 
@@ -278,14 +280,9 @@ void ReceiverTask(void *parameters) {
 
         if (status == pdPASS) {
 
-            if (pkt->seq != expectedSeq) {
-                for (int32_t lostSeq = expectedSeq; lostSeq < pkt->seq; ++lostSeq) {
-                    printf("Packet lost at receiver %d: expected seq=%ld\n", myId, (long)lostSeq);
-                    xSemaphoreTake(stats_mutex, portMAX_DELAY);
-                    total_lost++;
-                    xSemaphoreGive(stats_mutex);
 
-                }
+
+
             }
             printf("Packet received: to=%d from=%d seq=%ld data=\"%s\"\n", pkt->to, pkt->from, (long)pkt->seq, pkt->data);
             expectedSeq = pkt->seq + 1;
@@ -329,7 +326,7 @@ total_bytes_received += pkt->size;
             CheckAndReportStatsAndStop();
                 }
             }
-        }
+
 
 
 static void setupQueues(void) {
