@@ -39,7 +39,7 @@ struct led blinkLeds[4];
 #define P_DROP_SCALE   100
 #define QUEUE_SIZE 200
 #define PACKET_DATA_LEN 32
-#define MAX_PACKETS 20000 // max no of seq no  can be recieved
+#define MAX_PACKETS 20000 // max no of seq array or received packets  
 #define NO_OF_PACKETS 2000 // max no of recieved packets to print results
 
 
