@@ -33,11 +33,13 @@ struct led blinkLeds[4];
 #define PACKET_GEN_INTERVAL 200 //intially
 #define TIMEOUT_PERIOD 500
 #define MAX_RETRIES 4
+#define C_LINK_CAPACITY 100000   
+#define PROP_DELAY_MS    5  
 #define P_DROP_PERCENT 1    // because double doesnot work here so
 #define P_DROP_SCALE   100
 #define QUEUE_SIZE 200
 #define PACKET_DATA_LEN 32
-#define Max_num_of_packets  2000
+#define MAX_PACKETS 20000 
 
 
 // ----------------------------------------------------------------------------
@@ -81,16 +83,18 @@ BaseType_t xTimer1Started, xTimer2Started;
 #pragma GCC diagnostic ignored "-Wmissing-declarations"
 #pragma GCC diagnostic ignored "-Wreturn-type"
 
-
+static bool rx3_seenSeq[MAX_PACKETS];
+static bool rx4_seenSeq[MAX_PACKETS];
 
 typedef struct {
     int32_t from, to;
     int32_t seq;
     int16_t size, retries;
+    bool    isAck; 
     char data[PACKET_DATA_LEN];
 } Packet;
 
-static QueueHandle_t qToSwitch, qToRx3, qToRx4;
+static QueueHandle_t qToSwitch, qToRx3, qToRx4 , qToSwitch_ForACKs , qToSender1 , qToSender2 ;
 static SemaphoreHandle_t stats_mutex;
 
 
@@ -132,7 +136,7 @@ void print_final_stats(void) {
 void CheckAndReportStatsAndStop(void) {
     
     int32_t total;
-    int32_t MAX_num_of_packets = Max_num_of_packets ;
+    int32_t MAX_num_of_packets = MAX_PACKETS ;
     
     xSemaphoreTake(stats_mutex, portMAX_DELAY);
     total = total_received + total_lost;
@@ -208,9 +212,12 @@ void SenderTask(void *parameters) {
 }
 
 
+
+//-----------------------------------------------------------------------------------
+/*
 static Packet *switchBuffer[QUEUE_SIZE];
 static int switchPktCount = 0;
-static SemaphoreHandle_t switch_mutex;
+static SemaphoreHandle_t switch_mutex;  
 
 void SwitchTimerCallback(TimerHandle_t xTimer) {
     xSemaphoreTake(switch_mutex, portMAX_DELAY);
@@ -238,11 +245,72 @@ void SwitchTimerCallback(TimerHandle_t xTimer) {
     switchPktCount = 0;
     xSemaphoreGive(switch_mutex);
 }
+*/ 
+//-----------------------------------------------------------------------------------
+void SwitchForwardCallback(TimerHandle_t xTimer)
+{
+    Packet *delayedPkt = (Packet *)pvTimerGetTimerID(xTimer);
+
+    if (delayedPkt->to == 3) {
+        xQueueSendToBack(qToRx3, &delayedPkt, 0);
+printf("switch send to %d: \n", pkt->to);
+    } else if (delayedPkt->to == 4) {
+        xQueueSendToBack(qToRx4, &delayedPkt, 0);
+printf("switch send to %d: \n", pkt->to);
+    } else {
+      
+        vPortFree(delayedPkt);
+        xTimerDelete(xTimer, 0);
+        return;
+    }
+
+    xTimerDelete(xTimer, 0);
+}
+
+
 
 void SwitchTask(void *params) {
     Packet *pkt = NULL;
-    switch_mutex = xSemaphoreCreateMutex();
-    TimerHandle_t timer = xTimerCreate(
+    
+for (;;) {
+        if (xQueueReceive(qToSwitch, &pkt, portMAX_DELAY) == pdPASS) {
+            if ((rand() % P_DROP_SCALE) < P_DROP_PERCENT) {
+                vPortFree(pkt);
+                xSemaphoreTake(stats_mutex, portMAX_DELAY);
+                total_lost++;
+                xSemaphoreGive(stats_mutex);
+                CheckAndReportStatsAndStop();
+                continue;
+            }
+           unsigned long numerator     = (unsigned long)pkt->size * 8UL * 1000UL;
+            unsigned long tx_delay_ms   = (numerator + C_LINK_CAPACITY - 1)
+                                         / C_LINK_CAPACITY;
+ unsigned long total_delay_ms = PROP_DELAY_MS + tx_delay_ms;
+            TickType_t totalDelayTicks = pdMS_TO_TICKS((int)total_delay_ms);
+            TimerHandle_t fwdTimer = xTimerCreate(
+                "FwdTimer",
+                totalDelayTicks,
+                pdFALSE,             
+                (void *)pkt,         
+                SwitchForwardCallback
+            );
+            if (fwdTimer != NULL) {
+                xTimerStart(fwdTimer, 0);
+            } else {
+              
+                vPortFree(pkt);
+                xSemaphoreTake(stats_mutex, portMAX_DELAY);
+                total_lost++;
+                xSemaphoreGive(stats_mutex);
+                CheckAndReportStatsAndStop();
+            }
+        }
+    } 
+
+//-----------------------------------------------------------------------------------
+    /*
+switch_mutex = xSemaphoreCreateMutex();
+TimerHandle_t timer = xTimerCreate(
         "SwitchTimer",
         pdMS_TO_TICKS(LINK_PROP_DELAY),
         pdTRUE, // auto-reload
@@ -250,7 +318,10 @@ void SwitchTask(void *params) {
         SwitchTimerCallback
     );
 
-    if (timer != NULL) xTimerStart(timer, 0);
+    if (timer != NULL) xTimerStart(timer, 0); 
+
+
+
 
     while (1) {
         if (xQueueReceive(qToSwitch, &pkt, pdMS_TO_TICKS(50)) == pdPASS) {
@@ -266,7 +337,11 @@ void SwitchTask(void *params) {
             }
             xSemaphoreGive(switch_mutex);
         }
-    }
+    } */
+
+//-----------------------------------------------------------------------------------
+
+
 }
 
 void ReceiverTask(void *parameters) {
@@ -274,14 +349,15 @@ void ReceiverTask(void *parameters) {
     Packet *pkt = NULL;
     BaseType_t status;
     int32_t expectedSeq = 0;
-    const TickType_t ticksToWait = pdMS_TO_TICKS(TIMEOUT_PERIOD);
+ //   const TickType_t ticksToWait = pdMS_TO_TICKS(TIMEOUT_PERIOD);
 
-    while (1) {
-        if (myId == 3) {
-            status = xQueueReceive(qToRx3, &pkt, ticksToWait);
-        } else {
-            status = xQueueReceive(qToRx4, &pkt, ticksToWait);
-        }
+    for (;;) {
+     if (myId == 3) {
+    status = xQueueReceive(qToRx3, &pkt, portMAX_DELAY);
+} else {
+    status = xQueueReceive(qToRx4, &pkt, portMAX_DELAY);
+}
+
 
         if (status == pdPASS) {
             if (pkt->seq != expectedSeq) {
@@ -294,13 +370,45 @@ void ReceiverTask(void *parameters) {
                 }
             }
             printf("Packet received: to=%d from=%d seq=%ld data=\"%s\"\n", pkt->to, pkt->from, (long)pkt->seq, pkt->data);
-            expectedSeq = pkt->seq + 1;
+if (myId == 3) {
+    if (!rx3_seenSeq[pkt->seq]) {
+        rx3_seenSeq[pkt->seq] = true;
+        xSemaphoreTake(stats_mutex, portMAX_DELAY);
+        total_received++;
+        xSemaphoreGive(stats_mutex);
+    }
+} else { // myId == 4
+    if (!rx4_seenSeq[pkt->seq]) {
+        rx4_seenSeq[pkt->seq] = true;
+        xSemaphoreTake(stats_mutex, portMAX_DELAY);
+        total_received++;
+        xSemaphoreGive(stats_mutex);
+    }
+}           
+expectedSeq = pkt->seq + 1;
+
+                Packet *ackPkt = (Packet *)pvPortMalloc(sizeof(Packet));
+                if (ackPkt != NULL) {
+                    ackPkt->isAck   = true;
+                    ackPkt->from    = myId;
+                    ackPkt->to      = pkt->from;             
+                    ackPkt->seq     = pkt->seq;
+                    ackPkt->size    = 40;         
+                    ackPkt->retries = 0;
+                    if (xQueueSend(qToSwitch_ForACKs, &ackPkt, 0) != pdPASS) {
+                        vPortFree(ackPkt);
+                    }
+                }
+            
             vPortFree(pkt);
             xSemaphoreTake(stats_mutex, portMAX_DELAY);
             total_received++;
             xSemaphoreGive(stats_mutex);
             CheckAndReportStatsAndStop();
-        } else {
+        }
+//-----------------------------------------------------------------------------------
+/*
+else {
             printf("Packet lost at receiver %d: expected seq=%ld (timeout)\n", myId, (long)expectedSeq);
             expectedSeq++;
             xSemaphoreTake(stats_mutex, portMAX_DELAY);
@@ -308,6 +416,8 @@ void ReceiverTask(void *parameters) {
             xSemaphoreGive(stats_mutex);
             CheckAndReportStatsAndStop();
         }
+*/
+//-----------------------------------------------------------------------------------
     }
 }
 
@@ -315,6 +425,10 @@ static void setupQueues(void) {
     qToSwitch = xQueueCreate(QUEUE_SIZE, sizeof(Packet *));
     qToRx3    = xQueueCreate(QUEUE_SIZE, sizeof(Packet *));
     qToRx4    = xQueueCreate(QUEUE_SIZE, sizeof(Packet *));
+    qToSwitch_ForACKs   = xQueueCreate(QUEUE_SIZE, sizeof(Packet *));
+    qToSender1          = xQueueCreate(QUEUE_SIZE, sizeof(Packet *));
+    qToSender2          = xQueueCreate(QUEUE_SIZE, sizeof(Packet *));
+}
 }
 
 
