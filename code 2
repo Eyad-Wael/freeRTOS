@@ -124,44 +124,49 @@ void set_random_packet_data(Packet* pkt) {
 void print_final_stats(void) {
     int32_t total = total_received + total_lost;
     int32_t pct_int = 0, pct_frac = 0;
+
     if (total > 0) {
-        int32_t pct_percent = (10000 * total_lost) / total; // because double doesnot work here so we will split into 2 ints 
+        int32_t pct_percent = (10000 * total_lost) / total;  // because double doesnot work here so we will split into 2 ints 
         pct_int = pct_percent / 100;
         pct_frac = pct_percent % 100;
     }
+
     printf("=== Simulation Complete ===\n");
     printf("Total received packets: %ld\n", (long)total_received);
     printf("Total lost packets: %ld\n", (long)total_lost);
     printf("Loss percentage: %ld.%02ld%%\n", (long)pct_int, (long)pct_frac);
- TickType_t endTick   = xTaskGetTickCount();
+
+    TickType_t endTick = xTaskGetTickCount();
     TickType_t deltaTicks = endTick - startTick;
 
-      if (deltaTicks == 0) {
+    if (deltaTicks == 0) {
         printf("Throughput = 0 bytes/sec (elapsed time = 0 ticks)\n");
         return;
     }
- uint32_t throughput_bps = ( (uint32_t)total_bytes_received * (uint32_t)configTICK_RATE_HZ )
-                              / (uint32_t)deltaTicks;
 
+    uint32_t throughput_bps = ((uint32_t)total_bytes_received * (uint32_t)configTICK_RATE_HZ) / (uint32_t)deltaTicks;
     printf("Throughput = %lu bytes/sec\n", (unsigned long)throughput_bps);
 }
 
+
 void CheckAndReportStatsAndStop(void) {
-    
-    int32_t total;
-    int32_t MAX_num_of_packets = NO_OF_PACKETS ;
-    
+    static bool reported = false;
+    if (reported) return;
+
     xSemaphoreTake(stats_mutex, portMAX_DELAY);
-    total = total_received + total_lost;
-    xSemaphoreGive(stats_mutex);
-    if (total >= MAX_num_of_packets ) {
-        
+    int32_t total = total_received + total_lost;
+
+    if (total >= NO_OF_PACKETS) {
+        reported = true;
         print_final_stats();
-        while (1) vTaskDelay(portMAX_DELAY);//willnot work correctly as freertos switchs tasks unifromly
-    }else {
-return;
+        xSemaphoreGive(stats_mutex);
+
+        vTaskEndScheduler();  //willnot work correctly as freertos switchs tasks unifromly
+    } else {
+        xSemaphoreGive(stats_mutex);
     }
 }
+
 
 
 typedef struct {
