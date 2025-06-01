@@ -1,4 +1,8 @@
-
+// ----------------------------------------------------------------------------
+// ----------------------------------------------------------------------------
+// ----------------------------------------------------------------------------
+// ----------------------------------------------------------------------------
+// ----------------------------------------------------------------------------
 #include <stdio.h>
 #include <stdlib.h>
 #include "diag/trace.h"
@@ -126,7 +130,7 @@ void print_final_stats(void) {
     int32_t pct_int = 0, pct_frac = 0;
 
     if (total > 0) {
-        int32_t pct_percent = (10000 * total_lost) / total;  // because double doesnot work here so we will split into 2 ints 
+        int32_t pct_percent = (10000 * total_lost) / total; // because double doesnot work here so we will split into 2 ints 
         pct_int = pct_percent / 100;
         pct_frac = pct_percent % 100;
     }
@@ -148,7 +152,6 @@ void print_final_stats(void) {
     printf("Throughput = %lu bytes/sec\n", (unsigned long)throughput_bps);
 }
 
-
 void CheckAndReportStatsAndStop(void) {
     static bool reported = false;
     if (reported) return;
@@ -160,8 +163,7 @@ void CheckAndReportStatsAndStop(void) {
         reported = true;
         print_final_stats();
         xSemaphoreGive(stats_mutex);
-
-        vTaskEndScheduler();  //willnot work correctly as freertos switchs tasks unifromly
+        vTaskEndScheduler();
     } else {
         xSemaphoreGive(stats_mutex);
     }
@@ -231,40 +233,7 @@ void SenderTask(void *parameters) {
 
 
 
-//-----------------------------------------------------------------------------------
-/*
-static Packet *switchBuffer[QUEUE_SIZE];
-static int switchPktCount = 0;
-static SemaphoreHandle_t switch_mutex;  
 
-void SwitchTimerCallback(TimerHandle_t xTimer) {
-    xSemaphoreTake(switch_mutex, portMAX_DELAY);
-    for (int i = 0; i < switchPktCount; ++i) {
-        Packet *pkt = switchBuffer[i];
-        int drop_rand = rand() % P_DROP_SCALE; //brings the random into a range from 0  to 99 as possibilities
-        if (drop_rand < P_DROP_PERCENT) {// if it lessthan 1 (=0) dropped (1 possibility out of 100)
-            vPortFree(pkt);
-            xSemaphoreTake(stats_mutex, portMAX_DELAY);
-            total_lost++;
-            xSemaphoreGive(stats_mutex);
-            CheckAndReportStatsAndStop();
-            continue;
-        }
-        if (pkt->to == 3) {
-            xQueueSendToBack(qToRx3, &pkt, 0);
-            printf("switch send to %d: \n", pkt->to);
-        } else if (pkt->to == 4) {
-            xQueueSendToBack(qToRx4, &pkt, 0);
-            printf("switch send to %d: \n", pkt->to);
-        } else {
-            vPortFree(pkt);
-        }
-    }
-    switchPktCount = 0;
-    xSemaphoreGive(switch_mutex);
-}
-*/ 
-//-----------------------------------------------------------------------------------
 void SwitchForwardCallback(TimerHandle_t xTimer)
 {
     Packet *delayedPkt = (Packet *)pvTimerGetTimerID(xTimer);
@@ -324,42 +293,6 @@ for (;;) {
             }
         }
     } 
-
-//-----------------------------------------------------------------------------------
-    /*
-switch_mutex = xSemaphoreCreateMutex();
-TimerHandle_t timer = xTimerCreate(
-        "SwitchTimer",
-        pdMS_TO_TICKS(LINK_PROP_DELAY),
-        pdTRUE, // auto-reload
-        NULL,
-        SwitchTimerCallback
-    );
-
-    if (timer != NULL) xTimerStart(timer, 0); 
-
-
-
-
-    while (1) {
-        if (xQueueReceive(qToSwitch, &pkt, pdMS_TO_TICKS(50)) == pdPASS) {
-            xSemaphoreTake(switch_mutex, portMAX_DELAY);
-            if (switchPktCount < QUEUE_SIZE) {
-                switchBuffer[switchPktCount++] = pkt;
-            } else {
-                vPortFree(pkt);
-                xSemaphoreTake(stats_mutex, portMAX_DELAY);
-                total_lost++;
-                xSemaphoreGive(stats_mutex);
-                CheckAndReportStatsAndStop();
-            }
-            xSemaphoreGive(switch_mutex);
-        }
-    } */
-
-//-----------------------------------------------------------------------------------
-
-
 }
 
 void ReceiverTask(void *parameters) {
@@ -438,22 +371,7 @@ xSemaphoreTake(stats_mutex, portMAX_DELAY);
             }
         }
     }
-          
-        }
-//-----------------------------------------------------------------------------------
-/*
-else {
-            printf("Packet lost at receiver %d: expected seq=%ld (timeout)\n", myId, (long)expectedSeq);
-            expectedSeq++;
-            xSemaphoreTake(stats_mutex, portMAX_DELAY);
-            total_lost++;
-            xSemaphoreGive(stats_mutex);
-            CheckAndReportStatsAndStop();
-        }
-*/
-//-----------------------------------------------------------------------------------
-    }
-}
+  }
 
 static void setupQueues(void) {
     qToSwitch = xQueueCreate(QUEUE_SIZE, sizeof(Packet *));
