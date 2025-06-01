@@ -19,8 +19,17 @@
 
 // ----------------------------------------------------------------------------
 
+
 #include "led.h"
 
+#define BLINK_PORT_NUMBER         (3)
+#define BLINK_PIN_NUMBER_GREEN    (12)
+#define BLINK_PIN_NUMBER_ORANGE   (13)
+#define BLINK_PIN_NUMBER_RED      (14)
+#define BLINK_PIN_NUMBER_BLUE     (15)
+#define BLINK_ACTIVE_LOW          (false)
+
+struct led blinkLeds[4];
 
 
 #define HEADER_SIZE_BYTES   20  
@@ -39,6 +48,8 @@
 #define MAX_PACKETS 20000 // max no of seq array or received packets  
 #define NO_OF_PACKETS 2000 // max no of recieved packets to print results
 
+static void prvOneShotTimerCallback( TimerHandle_t xTimer );
+static void prvAutoReloadTimerCallback( TimerHandle_t xTimer );
 
 
 static TimerHandle_t xTimer1 = NULL;
@@ -378,7 +389,16 @@ static void setupQueues(void) {
 int
 main(int argc, char* argv[])
 {
+// Add your code here.
 
+	/*blinkLeds[0] = createLed(BLINK_PORT_NUMBER, BLINK_PIN_NUMBER_GREEN, BLINK_ACTIVE_LOW );
+	blinkLeds[1] = createLed(BLINK_PORT_NUMBER, BLINK_PIN_NUMBER_ORANGE, BLINK_ACTIVE_LOW );
+	blinkLeds[2] = createLed(BLINK_PORT_NUMBER, BLINK_PIN_NUMBER_RED, BLINK_ACTIVE_LOW );
+	blinkLeds[3] = createLed(BLINK_PORT_NUMBER, BLINK_PIN_NUMBER_BLUE, BLINK_ACTIVE_LOW );
+
+	for (int i=0; i<4; i++){
+		power_up(&blinkLeds[i]);
+	}*/
   xTimerHandle xTimer1 = xTimerCreate("Timer1", (pdMS_TO_TICKS(2000)), pdFALSE, (void *)0, NULL);
     xTimerHandle xTimer2 = xTimerCreate("Timer2", (pdMS_TO_TICKS(TIMEOUT_PERIOD)), pdTRUE, (void *)1, NULL);
 
@@ -416,6 +436,23 @@ main(int argc, char* argv[])
 
 // ----------------------------------------------------------------------------
 
+static void prvOneShotTimerCallback( TimerHandle_t xTimer )
+{
+
+	turn_on (&blinkLeds[1]);
+}
+
+static void prvAutoReloadTimerCallback( TimerHandle_t xTimer )
+{
+
+
+
+	if(isOn(blinkLeds[0])){
+		turn_off(&blinkLeds[0]);
+	} else {
+		turn_on(&blinkLeds[0]);
+	}
+}
 
 
 void vApplicationMallocFailedHook( void )
