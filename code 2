@@ -266,12 +266,11 @@ void SwitchForwardCallback(TimerHandle_t xTimer)
 
     if (delayedPkt->to == 3) {
         xQueueSendToBack(qToRx3, &delayedPkt, 0);
-printf("switch send to %d: \n", pkt->to);
+        printf("switch send to %d: \n", delayedPkt->to);
     } else if (delayedPkt->to == 4) {
         xQueueSendToBack(qToRx4, &delayedPkt, 0);
-printf("switch send to %d: \n", pkt->to);
+        printf("switch send to %d: \n", delayedPkt->to);
     } else {
-      
         vPortFree(delayedPkt);
         xTimerDelete(xTimer, 0);
         return;
@@ -279,6 +278,7 @@ printf("switch send to %d: \n", pkt->to);
 
     xTimerDelete(xTimer, 0);
 }
+
 
 
 
@@ -419,10 +419,7 @@ CheckAndReportStatsAndStop();
                 }
             
             vPortFree(pkt);
-            xSemaphoreTake(stats_mutex, portMAX_DELAY);
-            total_received++;
-            xSemaphoreGive(stats_mutex);
-            CheckAndReportStatsAndStop();
+          
         }
 //-----------------------------------------------------------------------------------
 /*
@@ -447,7 +444,7 @@ static void setupQueues(void) {
     qToSender1          = xQueueCreate(QUEUE_SIZE, sizeof(Packet *));
     qToSender2          = xQueueCreate(QUEUE_SIZE, sizeof(Packet *));
 }
-}
+
 
 
 
