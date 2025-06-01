@@ -31,7 +31,7 @@ struct led blinkLeds[4];
 #define L2_BYTES   1500
 #define LINK_PROP_DELAY 200
 #define PACKET_GEN_INTERVAL 200 //intially
-#define TIMEOUT_PERIOD 500
+#define TIMEOUT_PERIOD 150
 #define MAX_RETRIES 4
 #define C_LINK_CAPACITY 100000   
 #define PROP_DELAY_MS    5  
@@ -40,6 +40,7 @@ struct led blinkLeds[4];
 #define QUEUE_SIZE 200
 #define PACKET_DATA_LEN 32
 #define MAX_PACKETS 20000 
+#define NO_OF_PACKETS 2000 
 
 
 // ----------------------------------------------------------------------------
@@ -100,7 +101,8 @@ static SemaphoreHandle_t stats_mutex;
 
 static int32_t total_received = 0;
 static int32_t total_lost = 0;
-
+static uint32_t total_bytes_received = 0;
+static TickType_t startTick          = 0;  
 
 const char* message_pool[] = {
     "eyad",
@@ -131,12 +133,23 @@ void print_final_stats(void) {
     printf("Total received packets: %ld\n", (long)total_received);
     printf("Total lost packets: %ld\n", (long)total_lost);
     printf("Loss percentage: %ld.%02ld%%\n", (long)pct_int, (long)pct_frac);
+ TickType_t endTick   = xTaskGetTickCount();
+    TickType_t deltaTicks = endTick - startTick;
+
+      if (deltaTicks == 0) {
+        printf("Throughput = 0 bytes/sec (elapsed time = 0 ticks)\n");
+        return;
+    }
+ uint32_t throughput_bps = ( (uint32_t)total_bytes_received * (uint32_t)configTICK_RATE_HZ )
+                              / (uint32_t)deltaTicks;
+
+    printf("Throughput = %lu bytes/sec\n", (unsigned long)throughput_bps);
 }
 
 void CheckAndReportStatsAndStop(void) {
     
     int32_t total;
-    int32_t MAX_num_of_packets = MAX_PACKETS ;
+    int32_t MAX_num_of_packets = NO_OF_PACKETS ;
     
     xSemaphoreTake(stats_mutex, portMAX_DELAY);
     total = total_received + total_lost;
@@ -370,22 +383,27 @@ void ReceiverTask(void *parameters) {
                 }
             }
             printf("Packet received: to=%d from=%d seq=%ld data=\"%s\"\n", pkt->to, pkt->from, (long)pkt->seq, pkt->data);
+expectedSeq = pkt->seq + 1;
 if (myId == 3) {
     if (!rx3_seenSeq[pkt->seq]) {
         rx3_seenSeq[pkt->seq] = true;
         xSemaphoreTake(stats_mutex, portMAX_DELAY);
         total_received++;
+total_bytes_received += pkt->size;
         xSemaphoreGive(stats_mutex);
+CheckAndReportStatsAndStop();
     }
-} else { // myId == 4
+} else { 
     if (!rx4_seenSeq[pkt->seq]) {
         rx4_seenSeq[pkt->seq] = true;
         xSemaphoreTake(stats_mutex, portMAX_DELAY);
         total_received++;
+total_bytes_received += pkt->size;
         xSemaphoreGive(stats_mutex);
+CheckAndReportStatsAndStop();
     }
 }           
-expectedSeq = pkt->seq + 1;
+
 
                 Packet *ackPkt = (Packet *)pvPortMalloc(sizeof(Packet));
                 if (ackPkt != NULL) {
@@ -484,7 +502,7 @@ main(int argc, char* argv[])
 	    xTaskCreate(ReceiverTask, "Receiver3", 2048, (void*)3, 2, NULL);
 	    xTaskCreate(ReceiverTask, "Receiver4", 2048, (void*)4, 2, NULL);
 	    xTaskCreate(SwitchTask, "Switch", 2048, NULL, 1, NULL);
-
+startTick = xTaskGetTickCount();
 		vTaskStartScheduler();
 	}
 
