@@ -373,17 +373,19 @@ void ReceiverTask(void *parameters) {
 
 
         if (status == pdPASS) {
+bool needToStop = false;
             if (pkt->seq != expectedSeq) {
                 for (int32_t lostSeq = expectedSeq; lostSeq < pkt->seq; ++lostSeq) {
                     printf("Packet lost at receiver %d: expected seq=%ld\n", myId, (long)lostSeq);
                     xSemaphoreTake(stats_mutex, portMAX_DELAY);
                     total_lost++;
                     xSemaphoreGive(stats_mutex);
-                    CheckAndReportStatsAndStop();
+                   
                 }
             }
             printf("Packet received: to=%d from=%d seq=%ld data=\"%s\"\n", pkt->to, pkt->from, (long)pkt->seq, pkt->data);
 expectedSeq = pkt->seq + 1;
+bool   isNew = false;
 if (myId == 3) {
     if (!rx3_seenSeq[pkt->seq]) {
         rx3_seenSeq[pkt->seq] = true;
@@ -391,7 +393,7 @@ if (myId == 3) {
         total_received++;
 total_bytes_received += pkt->size;
         xSemaphoreGive(stats_mutex);
-CheckAndReportStatsAndStop();
+isNew = true;
     }
 } else { 
     if (!rx4_seenSeq[pkt->seq]) {
@@ -400,7 +402,7 @@ CheckAndReportStatsAndStop();
         total_received++;
 total_bytes_received += pkt->size;
         xSemaphoreGive(stats_mutex);
-CheckAndReportStatsAndStop();
+isNew = true;
     }
 }           
 
@@ -419,6 +421,18 @@ CheckAndReportStatsAndStop();
                 }
             
             vPortFree(pkt);
+xSemaphoreTake(stats_mutex, portMAX_DELAY);
+            int32_t recvd = total_received;
+            xSemaphoreGive(stats_mutex);
+
+            if (recvd >= NO_OF_PACKETS) {
+                print_final_stats();
+                for (;;) {
+                    vTaskDelay(portMAX_DELAY);
+                }
+            }
+        }
+    }
           
         }
 //-----------------------------------------------------------------------------------
