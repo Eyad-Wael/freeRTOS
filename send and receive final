@@ -204,24 +204,47 @@ int min_ms = 100;
     TickType_t newPeriod = pdMS_TO_TICKS(r_ms);
     xTimerChangePeriod(xTimer, newPeriod, 0);
 }
-
 void SenderTask(void *parameters) {
     SenderState *state = (SenderState *)parameters;
     int senderIdx = (state->myId == 1) ? 0 : 1;
     TxBuffer* txbuf = &senderTxBuffers[senderIdx];
 
-    txbuf->timer = xTimerCreate("SenderTout", pdMS_TO_TICKS(TOUT_PERIOD_MS), pdFALSE, (void*)senderIdx, SenderTimeoutCallback);
+    // Create the timeout timer once for each sender
+    if (txbuf->timer == NULL) { // Only create once
+        txbuf->timer = xTimerCreate(
+            "SenderTout",
+            pdMS_TO_TICKS(TIMEOUT_PERIOD),
+            pdFALSE,
+            (void*)senderIdx,
+            SenderTimeoutCallback
+        );
+    }
+
+    QueueHandle_t myAckQueue = (senderIdx == 0) ? qToSender1 : qToSender2;
 
     for (;;) {
+        // --- Poll for ACKs and handle them ---
+        Packet* ackPkt = NULL;
+        if (xQueueReceive(myAckQueue, &ackPkt, 0) == pdPASS) {
+            SenderAckHandler(senderIdx, ackPkt);
+        }
+
+        // --- If not waiting for ACK, send a new packet ---
         if (!txbuf->awaiting_ack) {
             Packet *pkt = (Packet *)pvPortMalloc(sizeof(Packet));
+            if (!pkt) {
+                vTaskDelay(pdMS_TO_TICKS(10));
+                continue; // Try again later if allocation failed
+            }
             pkt->from = state->myId;
             pkt->to = (rand() % 2 == 0) ? 3 : 4;
             int range = L2_BYTES - L1_BYTES + 1;
             pkt->size = HEADER_SIZE_BYTES + (L1_BYTES + (rand() % range));
             pkt->retries = 0;
+            pkt->isAck = 0;
             set_random_packet_data(pkt);
 
+            // Assign sequence number for the chosen receiver
             if (pkt->to == 3) pkt->seq = state->seq3++;
             else pkt->seq = state->seq4++;
 
@@ -232,9 +255,10 @@ void SenderTask(void *parameters) {
             xQueueSend(qToSwitch, &pkt, 0);
             xTimerStart(txbuf->timer, 0); // Start timeout for this packet
 
-            printf("Sender %d: Sent seq=%ld\n", senderIdx+1, (long)pkt->seq);
+            printf("Sender %d: Sent seq=%ld to %d\n", senderIdx+1, (long)pkt->seq, pkt->to);
         }
-        vTaskDelay(pdMS_TO_TICKS(PACKET_GEN_INTERVAL));
+
+        vTaskDelay(pdMS_TO_TICKS(1)); // Short delay for responsiveness
     }
 }
 
