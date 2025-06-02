@@ -197,7 +197,7 @@ void SenderTimeoutCallback(TimerHandle_t xTimer) {
 }
 
 void send_and_buffer(SenderState *state, Packet *pkt) {
-    int idx = find_inflight(pkt->from, 0, true);
+    int idx = find_inflight(pkt->from, true);
     if (idx == -1) {
         printf("Sender: Inflight full, dropping seq %ld\n", (long)pkt->seq);
         vPortFree(pkt);
@@ -247,10 +247,11 @@ void SenderTimerCallback(TimerHandle_t xTimer) {
         set_random_packet_data(pkt);
 
         pkt->seq = state->nextseqnum++; 
+xSemaphoreGive(stats_mutex);
+
         send_and_buffer(state, pkt);
     }
-    xSemaphoreGive(stats_mutex);
-
+    
     int min_ms = 100;
     int max_ms = 200;
     int range_ms = max_ms - min_ms + 1;
