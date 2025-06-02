@@ -38,6 +38,7 @@
 #define PROP_DELAY_MS    5
 #define P_DROP_PERCENT 1    // because double doesnot work here so
 #define P_DROP_SCALE   100
+#define P_ACK 1 
 #define QUEUE_SIZE 200
 #define PACKET_DATA_LEN 32
 #define NO_OF_PACKETS 2000 // max no of recieved packets to print results
@@ -230,15 +231,20 @@ void SwitchTask(void *params) {
 for (;;) {
 
 if (xQueueReceive(qToSwitch, &pkt, portMAX_DELAY) == pdPASS) {
-           
-            if (pkt->isAck) {
+if (pkt->isAck) {
+        if ((rand() % P_DROP_SCALE) < P_ACK) {
+            printf("Switch: DROPPED ACK seq=%ld\n", pkt->seq);
+            vPortFree(pkt);
+            return;
+        }
+      
              
                 if (pkt->to == 1) {
                     xQueueSend(qToSender1, &pkt, 0);
-printf("ACK received: to=%d from=%d seq=%ld data=\"%s\"\n", pkt->to, pkt->from, (long)pkt->seq, pkt->data);
+printf("Switch: Forwarded ACK to Sender1 seq=%ld\n", pkt->seq);
                 } else if (pkt->to == 2) {
                     xQueueSend(qToSender2, &pkt, 0);
-printf("ACK received: to=%d from=%d seq=%ld data=\"%s\"\n", pkt->to, pkt->from, (long)pkt->seq, pkt->data);
+printf("Switch: Forwarded ACK to Sender2 seq=%ld\n", pkt->seq);
                 } else {
                     vPortFree(pkt);
                 }
@@ -372,7 +378,7 @@ main(int argc, char* argv[])
 
 
 
-
+	    srand((unsigned)time(NULL));
 	    setupQueues();
 	    stats_mutex = xSemaphoreCreateMutex();
 
