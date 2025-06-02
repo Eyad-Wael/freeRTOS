@@ -51,6 +51,15 @@ static bool rx4_seenSeq[NO_OF_PACKETS];
 
 
 typedef struct {
+    Packet* pkt;
+    int     retries;
+    TimerHandle_t timer;
+    int     awaiting_ack;
+} TxBuffer;
+
+static TxBuffer senderTxBuffers[2];
+
+typedef struct {
     int32_t from, to;
     int32_t seq;
     int16_t size, retries;
@@ -139,6 +148,25 @@ typedef struct {
 
 static SenderState senderStates[2];
 
+void SenderTimeoutCallback(TimerHandle_t xTimer) {
+    int senderIdx = (int)pvTimerGetTimerID(xTimer); // 0 or 1
+    TxBuffer* txbuf = &senderTxBuffers[senderIdx];
+
+    if (txbuf->awaiting_ack && txbuf->retries < MAX_RETRIES) {
+        txbuf->retries++;
+        // Retransmit packet
+        xQueueSend(qToSwitch, &txbuf->pkt, 0);
+        printf("Sender %d: Timeout, retransmitting seq=%ld retry %d\n", senderIdx+1, (long)txbuf->pkt->seq, txbuf->retries);
+        // Restart timer
+        xTimerStart(txbuf->timer, 0);
+    } else {
+        printf("Sender %d: Max retries reached for seq=%ld\n", senderIdx+1, (long)txbuf->pkt->seq);
+        vPortFree(txbuf->pkt);
+        txbuf->pkt = NULL;
+        txbuf->awaiting_ack = 0;
+    }
+}
+
 void SenderTimerCallback(TimerHandle_t xTimer) {
 
     SenderState *state = (SenderState *)pvTimerGetTimerID(xTimer);
@@ -178,21 +206,37 @@ int min_ms = 100;
 }
 
 void SenderTask(void *parameters) {
-
     SenderState *state = (SenderState *)parameters;
-    TimerHandle_t timer = xTimerCreate(
-        "SenderTimer",
-        pdMS_TO_TICKS(PACKET_GEN_INTERVAL),
-        pdFALSE,
-        (void *)state,
-        SenderTimerCallback
-    );
-    if (timer != NULL) {
-        xTimerStart(timer, 0);
-    }
-    while (1) vTaskDelay(portMAX_DELAY);
-}
+    int senderIdx = (state->myId == 1) ? 0 : 1;
+    TxBuffer* txbuf = &senderTxBuffers[senderIdx];
 
+    txbuf->timer = xTimerCreate("SenderTout", pdMS_TO_TICKS(TOUT_PERIOD_MS), pdFALSE, (void*)senderIdx, SenderTimeoutCallback);
+
+    for (;;) {
+        if (!txbuf->awaiting_ack) {
+            Packet *pkt = (Packet *)pvPortMalloc(sizeof(Packet));
+            pkt->from = state->myId;
+            pkt->to = (rand() % 2 == 0) ? 3 : 4;
+            int range = L2_BYTES - L1_BYTES + 1;
+            pkt->size = HEADER_SIZE_BYTES + (L1_BYTES + (rand() % range));
+            pkt->retries = 0;
+            set_random_packet_data(pkt);
+
+            if (pkt->to == 3) pkt->seq = state->seq3++;
+            else pkt->seq = state->seq4++;
+
+            txbuf->pkt = pkt;
+            txbuf->retries = 0;
+            txbuf->awaiting_ack = 1;
+
+            xQueueSend(qToSwitch, &pkt, 0);
+            xTimerStart(txbuf->timer, 0); // Start timeout for this packet
+
+            printf("Sender %d: Sent seq=%ld\n", senderIdx+1, (long)pkt->seq);
+        }
+        vTaskDelay(pdMS_TO_TICKS(PACKET_GEN_INTERVAL));
+    }
+}
 
 
 
@@ -216,7 +260,24 @@ void SwitchForwardCallback(TimerHandle_t xTimer)
     xTimerDelete(xTimer, 0);
 }
 
+void SenderAckHandler(int senderIdx, Packet* ackPkt) {
+    TxBuffer* txbuf = &senderTxBuffers[senderIdx];
+    if (txbuf->awaiting_ack && txbuf->pkt && ackPkt->seq == txbuf->pkt->seq) {
+        xTimerStop(txbuf->timer, 0);
+        vPortFree(txbuf->pkt);
+        txbuf->pkt = NULL;
+        txbuf->awaiting_ack = 0;
+        printf("Sender %d: Received ACK for seq=%ld\n", senderIdx+1, (long)ackPkt->seq);
+    }
+    vPortFree(ackPkt);
+}
 
+// In SenderTask, poll for ACKs:
+QueueHandle_t myAckQueue = (senderIdx == 0) ? qToSender1 : qToSender2;
+Packet* ackPkt = NULL;
+if (xQueueReceive(myAckQueue, &ackPkt, 0) == pdPASS) {
+    SenderAckHandler(senderIdx, ackPkt);
+}
 
 
 void SwitchTask(void *params) {
