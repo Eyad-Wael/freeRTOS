@@ -1,7 +1,8 @@
 // ----------------------------------------------------------------------------
+// Go-Back-N Protocol Simulation with FreeRTOS (Integer Only Version)
+// ----------------------------------------------------------------------------
+// ----------------------------------------------------------------------------
 
-// ----------------------------------------------------------------------------
-// ----------------------------------------------------------------------------
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -15,8 +16,6 @@
 
 #define CCM_RAM __attribute__((section(".ccmram")))
 
-// ----------------------------------------------------------------------------
-
 #include "led.h"
 
 #define HEADER_SIZE_BYTES   20
@@ -28,14 +27,14 @@
 #define MAX_RETRIES         4
 #define C_LINK_CAPACITY     100000
 #define PROP_DELAY_MS       5
-#define P_DROP_PERCENT      1    // because double does not work here so
+#define P_DROP_PERCENT      1
 #define P_DROP_SCALE        100
 #define P_ACK               1 
 #define QUEUE_SIZE          200
 #define PACKET_DATA_LEN     32
-#define NO_OF_PACKETS       2000 // max no of received packets to print results
+#define NO_OF_PACKETS       2000
 #define MAX_INFLIGHT_PACKETS 20
-#define N                   8    // Window size: 2,4,8,16
+#define N                   8
 
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wunused-parameter"
@@ -64,12 +63,12 @@ typedef struct {
     int32_t myId;
     int32_t seq3;
     int32_t seq4;
-    int32_t base;       
-    int32_t nextseqnum;  
+    int32_t base;
+    int32_t nextseqnum;
 } SenderState;
 
 // ----------------------------------------------------------------------------
-//  Variables
+// Global Variables
 
 static bool rx3_seenSeq[NO_OF_PACKETS];
 static bool rx4_seenSeq[NO_OF_PACKETS];
@@ -86,7 +85,7 @@ static TickType_t startTick = 0;
 static SenderState senderStates[2];
 
 // ----------------------------------------------------------------------------
-//  Statistics
+// Utility & Statistics
 
 const char* message_pool[] = {
     "eyad",
@@ -118,7 +117,7 @@ void print_final_stats(void) {
     int32_t pct_int = 0, pct_frac = 0;
 
     if (total > 0) {
-        int32_t pct_percent = (10000 * total_lost) / total;  // because double doesnot work here so we  split it into 2 ints
+        int32_t pct_percent = (10000 * total_lost) / total; // scale by 100 for 2 decimals
         pct_int = pct_percent / 100;
         pct_frac = pct_percent % 100;
     }
@@ -136,10 +135,19 @@ void print_final_stats(void) {
         return;
     }
 
+    // Throughput (bytes/sec, using integer division)
     uint32_t throughput_bps = ((uint32_t)total_bytes_received * (uint32_t)configTICK_RATE_HZ) / (uint32_t)deltaTicks;
     printf("Throughput = %lu bytes/sec\n", (unsigned long)throughput_bps);
-    printf("Average number of transmissions per packet: %.2f\n",
-           total_received > 0 ? (float)total_transmissions / total_received : 0.0f);
+
+    // Average transmissions per packet (integer with 2 decimals)
+    uint32_t avg_tx_int = 0, avg_tx_frac = 0;
+    if (total_received > 0) {
+        uint32_t avg_tx_scaled = (total_transmissions * 100) / total_received;
+        avg_tx_int = avg_tx_scaled / 100;
+        avg_tx_frac = avg_tx_scaled % 100;
+    }
+    printf("Average number of transmissions per packet: %lu.%02lu\n", (unsigned long)avg_tx_int, (unsigned long)avg_tx_frac);
+
     printf("Packets dropped after exceeding max retries (%d): %lu\n",
            MAX_RETRIES, (unsigned long)total_dropped_max_retries);
     vTaskEndScheduler();
@@ -163,7 +171,7 @@ void CheckAndReportStatsAndStop(void) {
 }
 
 // ----------------------------------------------------------------------------
-// Sender 
+// Sender Logic (Go-Back-N)
 
 void SenderTimeoutCallback(TimerHandle_t xTimer) {
     int idx = (int)pvTimerGetTimerID(xTimer);
@@ -171,6 +179,7 @@ void SenderTimeoutCallback(TimerHandle_t xTimer) {
 
     xSemaphoreTake(stats_mutex, portMAX_DELAY);
 
+    // Retransmit all unACKed packets in window [base, nextseqnum)
     for (int seq = state->base; seq < state->nextseqnum; ++seq) {
         int idx2 = find_inflight(seq, false);
         if (idx2 != -1 && inflight[idx2].awaiting_ack) {
@@ -186,7 +195,7 @@ void SenderTimeoutCallback(TimerHandle_t xTimer) {
             total_transmissions++;
             xQueueSend(qToSwitch, &inflight[idx2].pkt, 0);
 
-          
+            // Restart timer for ONLY the oldest unACKed packet
             if (seq == state->base) {
                 xTimerStart(inflight[idx2].timer, 0);
             }
@@ -197,7 +206,7 @@ void SenderTimeoutCallback(TimerHandle_t xTimer) {
 }
 
 void send_and_buffer(SenderState *state, Packet *pkt) {
-    int idx = find_inflight(pkt->from, 0, true);
+    int idx = find_inflight(pkt->seq, true);
     if (idx == -1) {
         printf("Sender: Inflight full, dropping seq %ld\n", (long)pkt->seq);
         vPortFree(pkt);
@@ -246,7 +255,7 @@ void SenderTimerCallback(TimerHandle_t xTimer) {
         pkt->retries = 0;
         set_random_packet_data(pkt);
 
-        pkt->seq = state->nextseqnum++; 
+        pkt->seq = state->nextseqnum++;
         send_and_buffer(state, pkt);
     }
     xSemaphoreGive(stats_mutex);
@@ -275,7 +284,7 @@ void SenderTask(void *parameters) {
 }
 
 // ----------------------------------------------------------------------------
-// Switch 
+// Switch Logic
 
 void SwitchForwardCallback(TimerHandle_t xTimer) {
     Packet *delayedPkt = (Packet *)pvTimerGetTimerID(xTimer);
@@ -350,7 +359,7 @@ void SwitchTask(void *params) {
 }
 
 // ----------------------------------------------------------------------------
-// Receiver 
+// Receiver Logic (Go-Back-N)
 
 void ReceiverTask(void *parameters) {
     int32_t myId = (int32_t)parameters;
@@ -402,7 +411,7 @@ void ReceiverTask(void *parameters) {
 }
 
 // ----------------------------------------------------------------------------
-// Setup
+// FreeRTOS Setup
 
 static void setupQueues(void) {
     qToSwitch = xQueueCreate(QUEUE_SIZE, sizeof(Packet *));
@@ -443,26 +452,12 @@ int main(int argc, char* argv[]) {
 #pragma GCC diagnostic pop
 
 // ----------------------------------------------------------------------------
-void vApplicationMallocFailedHook(void) {
-    for (;;) ;
-}
+// FreeRTOS Required Hooks
 
-void vApplicationStackOverflowHook(TaskHandle_t pxTask, char *pcTaskName) {
-    (void) pcTaskName;
-    (void) pxTask;
-    for (;;) ;
-}
-
-void vApplicationIdleHook(void) {
-    volatile size_t xFreeStackSpace;
-    xFreeStackSpace = xPortGetFreeHeapSize();
-    if (xFreeStackSpace > 100) {
-        // Heap could be reduced
-    }
-}
-
-void vApplicationTickHook(void) {
-}
+void vApplicationMallocFailedHook(void) { for (;;) ; }
+void vApplicationStackOverflowHook(TaskHandle_t pxTask, char *pcTaskName) { (void) pcTaskName; (void) pxTask; for (;;) ; }
+void vApplicationIdleHook(void) { volatile size_t xFreeStackSpace; xFreeStackSpace = xPortGetFreeHeapSize(); if(xFreeStackSpace > 100) {} }
+void vApplicationTickHook(void) {}
 
 StaticTask_t xIdleTaskTCB CCM_RAM;
 StackType_t uxIdleTaskStack[configMINIMAL_STACK_SIZE] CCM_RAM;
