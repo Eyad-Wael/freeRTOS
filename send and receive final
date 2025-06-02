@@ -1,4 +1,4 @@
-// ----------------------------------------------------------------------------
+save this to ur memopry // ----------------------------------------------------------------------------
 // ----------------------------------------------------------------------------
 // ----------------------------------------------------------------------------
 // ----------------------------------------------------------------------------
@@ -42,6 +42,7 @@
 #define QUEUE_SIZE 200
 #define PACKET_DATA_LEN 32
 #define NO_OF_PACKETS 2000 // max no of recieved packets to print results
+#define MAX_INFLIGHT_PACKETS 20
 
 
 
@@ -54,6 +55,15 @@
 
 static bool rx3_seenSeq[NO_OF_PACKETS];
 static bool rx4_seenSeq[NO_OF_PACKETS];
+static InflightPacket inflight[MAX_INFLIGHT_PACKETS];
+
+
+typedef struct {
+    Packet *pkt;
+    TimerHandle_t timer;
+    int retries;
+    bool awaiting_ack;
+} InflightPacket;
 
 
 typedef struct {
@@ -82,6 +92,15 @@ const char* message_pool[] = {
     "cairo university"
 };
 #define MESSAGE_POOL_SIZE (sizeof(message_pool)/sizeof(message_pool[0]))
+
+
+int find_inflight(int seq, bool want_empty) {
+    for (int i = 0; i < MAX_INFLIGHT_PACKETS; ++i) {
+        if (want_empty && !inflight[i].awaiting_ack) return i;
+        if (!want_empty && inflight[i].awaiting_ack && inflight[i].pkt->seq == seq) return i;
+    }
+    return -1;
+}
 
 void set_random_packet_data(Packet* pkt) {
     if (!pkt) return;
@@ -145,6 +164,55 @@ typedef struct {
 
 static SenderState senderStates[2];
 
+void SenderTimeoutCallback(TimerHandle_t xTimer) {
+    int idx = (int)pvTimerGetTimerID(xTimer);
+    if (inflight[idx].awaiting_ack) {
+        inflight[idx].retries++;
+        if (inflight[idx].retries > MAX_RETRIES) {
+            printf("Sender: Seq %ld max retries reached, giving up.\n", (long)inflight[idx].pkt->seq);
+            vPortFree(inflight[idx].pkt);
+            inflight[idx].awaiting_ack = false;
+            return;
+        }
+        printf("Sender: Timeout. Retransmitting seq %ld (retry %d)\n", (long)inflight[idx].pkt->seq, inflight[idx].retries);
+        xQueueSend(qToSwitch, &inflight[idx].pkt, 0);
+        xTimerStart(inflight[idx].timer, 0);
+    }
+}
+
+void send_and_buffer(SenderState *state, Packet *pkt) {
+    int idx = find_inflight(pkt->from, 0, true);
+    if (idx == -1) {
+        printf("Sender: Inflight full, dropping seq %ld\n", (long)pkt->seq);
+        vPortFree(pkt);
+        return;
+    }
+    inflight[idx].pkt = pkt;
+    inflight[idx].retries = 0;
+    inflight[idx].awaiting_ack = true;
+    inflight[idx].timer = xTimerCreate("Tout", pdMS_TO_TICKS(TIMEOUT_PERIOD), pdFALSE, (void*)idx, SenderTimeoutCallback);
+    xQueueSend(qToSwitch, &pkt, 0);
+    xTimerStart(inflight[idx].timer, 0);
+}
+
+void handle_ack(int myId, int ack_seq) {
+    int idx = find_inflight(myId, ack_seq, false);
+    if (idx != -1) {
+        xTimerStop(inflight[idx].timer, 0);
+        xTimerDelete(inflight[idx].timer, 0);
+        vPortFree(inflight[idx].pkt);
+        inflight[idx].awaiting_ack = false;
+        printf("Sender: ACK received for seq %d, cleared from buffer\n", ack_seq);
+    }
+}
+
+
+
+
+
+
+
+
 void SenderTimerCallback(TimerHandle_t xTimer) {
 
     SenderState *state = (SenderState *)pvTimerGetTimerID(xTimer);
@@ -156,12 +224,10 @@ void SenderTimerCallback(TimerHandle_t xTimer) {
     int range = L2_BYTES - L1_BYTES + 1;
     int r = rand() % range;
     pkt->size = HEADER_SIZE_BYTES + (L1_BYTES + r);
-
-
-
     pkt->retries = 0;
 set_random_packet_data(pkt);
     xSemaphoreTake(stats_mutex, portMAX_DELAY);
+
     if (pkt->to == 3) {
         pkt->seq = state->seq3++;
     } else {
@@ -169,12 +235,7 @@ set_random_packet_data(pkt);
     }
     xSemaphoreGive(stats_mutex);
 
-    if (xQueueSend(qToSwitch, &pkt, 0) == pdPASS) {
-        printf("Sender: sent to switch: from=%d to=%d seq=%ld data=\"%s\"\n", pkt->from, pkt->to, (long)pkt->seq, pkt->data);
-    } else {
-        printf("Sender: Could not send to switch queue.\n");
-        vPortFree(pkt);
-    }
+     send_and_buffer(state, pkt);
 int min_ms = 100;
     int max_ms = 200;
     int range_ms = max_ms - min_ms + 1;
