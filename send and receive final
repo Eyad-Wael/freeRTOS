@@ -2,7 +2,6 @@
 // ----------------------------------------------------------------------------
 // ----------------------------------------------------------------------------
 // ----------------------------------------------------------------------------
-// ----------------------------------------------------------------------------
 #include <stdio.h>
 #include <stdlib.h>
 #include "diag/trace.h"
@@ -15,26 +14,27 @@
 
 #define CCM_RAM __attribute__((section(".ccmram")))
 
+// ----------------------------------------------------------------------------
+
 #include "led.h"
 
-
 #define HEADER_SIZE_BYTES   20
-#define L1_BYTES            64      // reduced from 500
-#define L2_BYTES            128     // reduced from 1500
-#define K                   20      // reduced ack size
-#define PACKET_GEN_INTERVAL 200
+#define L1_BYTES            500
+#define L2_BYTES            1500
+#define K                   40 //ack size
+#define PACKET_GEN_INTERVAL 200 // initially
 #define TIMEOUT_PERIOD      150
-#define MAX_RETRIES         3       // slightly lower
+#define MAX_RETRIES         4
 #define C_LINK_CAPACITY     100000
 #define PROP_DELAY_MS       5
-#define P_DROP_PERCENT      1
+#define P_DROP_PERCENT      1    // because double does not work here so
 #define P_DROP_SCALE        100
 #define P_ACK               1
-#define QUEUE_SIZE          6       // reduced from 20
-#define PACKET_DATA_LEN     12      // reduced from 32
-#define NO_OF_PACKETS       32      // reduced from 200
-#define MAX_INFLIGHT_PACKETS 6      // reduced from 20
-#define N                   3       // Window size: 3
+#define QUEUE_SIZE          20
+#define PACKET_DATA_LEN     32
+#define NO_OF_PACKETS       200 // max no of received packets to print results
+#define MAX_INFLIGHT_PACKETS 20
+#define N                  8    // Window size: 2,4,8,16
 
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wunused-parameter"
@@ -45,70 +45,75 @@
 // Type Definitions
 
 typedef struct {
-    int8_t from, to;        // reduced from int32_t
-    uint8_t seq;            // reduced from int32_t
-    uint8_t size, retries;  // reduced from int16_t
-    uint8_t isAck;          // use uint8_t instead of bool
-    char data[PACKET_DATA_LEN];
+    int32_t from, to;
+    int32_t seq;
+    int16_t size, retries;
+    bool    isAck;
+    char    data[PACKET_DATA_LEN];
 } Packet;
 
 typedef struct {
     Packet *pkt;
     TimerHandle_t timer;
-    uint8_t retries;
-    uint8_t awaiting_ack:1;
-    int8_t ownerSenderId;
+    int retries;
+    bool awaiting_ack;
+int32_t ownerSenderId;
 } InflightPacket;
 
 typedef struct {
-    int8_t myId;
-    uint8_t base3, next3;
-    uint8_t base4, next4;
+    int32_t myId;
+    int32_t base3, next3;
+    int32_t base4, next4;
 } SenderState;
 
 // ----------------------------------------------------------------------------
 //  Variables
 
-static uint8_t rx3_seenSeq[NO_OF_PACKETS] = {0}; // 1 byte per entry saves memory vs bool
-static uint8_t rx4_seenSeq[NO_OF_PACKETS] = {0};
-static InflightPacket inflight[MAX_INFLIGHT_PACKETS];
-static uint16_t total_transmissions       = 0;
-static uint16_t total_dropped_max_retries = 0;
-static QueueHandle_t qToSwitch, qToRx3, qToRx4, qToSwitch_ForACKs, qToSender1, qToSender2;
+static bool             rx3_seenSeq[NO_OF_PACKETS];
+static bool             rx4_seenSeq[NO_OF_PACKETS];
+static InflightPacket   inflight[MAX_INFLIGHT_PACKETS];
+static uint32_t         total_transmissions       = 0;
+static uint32_t         total_dropped_max_retries = 0;
+static QueueHandle_t    qToSwitch, qToRx3, qToRx4, qToSwitch_ForACKs, qToSender1, qToSender2;
 static SemaphoreHandle_t stats_mutex;
 
-static uint16_t total_received     = 0;
-static uint16_t total_lost         = 0;
-static uint32_t total_bytes_received = 0;
-static TickType_t startTick        = 0;
-static SenderState senderStates[2];
+static int32_t          total_received     = 0;
+static int32_t          total_lost         = 0;
+static uint32_t         total_bytes_received = 0;
+static TickType_t       startTick          = 0;
+static SenderState      senderStates[2];
 
 // ----------------------------------------------------------------------------
 //  Statistics
 
 const char* message_pool[] = {
     "eyad",
-    "proj",
-    "2nd",
-    "embd",
-    "DrKF",
-    "CU"
+    "abdelrahman",
+    "second year",
+    "embeded project",
+    "Dr.Khaled Fouad",
+    "cairo university"
 };
 #define MESSAGE_POOL_SIZE (sizeof(message_pool)/sizeof(message_pool[0]))
 
 int find_empty_inflight_slot(void) {
-    for (int i = 0; i < MAX_INFLIGHT_PACKETS; ++i)
-        if (!inflight[i].awaiting_ack)
+    for (int i = 0; i < MAX_INFLIGHT_PACKETS; ++i) {
+        if (!inflight[i].awaiting_ack) {
             return i;
+        }
+    }
     return -1;
 }
 
-int find_inflight_by_seq(int8_t from, uint8_t seq) {
-    for (int i = 0; i < MAX_INFLIGHT_PACKETS; ++i)
+
+int find_inflight_by_seq(int32_t from, int32_t seq) {
+    for (int i = 0; i < MAX_INFLIGHT_PACKETS; ++i) {
         if (inflight[i].awaiting_ack &&
             inflight[i].ownerSenderId == from &&
-            inflight[i].pkt->seq == seq)
+            inflight[i].pkt->seq == seq) {
             return i;
+        }
+    }
     return -1;
 }
 
@@ -120,19 +125,19 @@ void set_random_packet_data(Packet* pkt) {
 }
 
 void print_final_stats(void) {
-    uint16_t total = total_received + total_lost;
-    uint16_t pct_int = 0, pct_frac = 0;
+    int32_t total = total_received + total_lost;
+    int32_t pct_int = 0, pct_frac = 0;
 
     if (total > 0) {
-        uint32_t pct_percent = (10000 * total_lost) / total;
+        int32_t pct_percent = (10000 * total_lost) / total;  // because double doesnot work here so we  split it into 2 ints
         pct_int = pct_percent / 100;
         pct_frac = pct_percent % 100;
     }
 
     printf("=== Simulation Complete ===\n");
-    printf("Total received packets: %u\n", total_received);
-    printf("Total lost packets: %u\n", total_lost);
-    printf("Loss percentage: %u.%02u%%\n", pct_int, pct_frac);
+    printf("Total received packets: %ld\n", (long)total_received);
+    printf("Total lost packets: %ld\n", (long)total_lost);
+    printf("Loss percentage: %ld.%02ld%%\n", (long)pct_int, (long)pct_frac);
 
     TickType_t endTick = xTaskGetTickCount();
     TickType_t deltaTicks = endTick - startTick;
@@ -142,32 +147,33 @@ void print_final_stats(void) {
         return;
     }
 
-    uint32_t throughput_bps = (total_bytes_received * configTICK_RATE_HZ) / deltaTicks;
+    uint32_t throughput_bps = ((uint32_t)total_bytes_received * (uint32_t)configTICK_RATE_HZ) / (uint32_t)deltaTicks;
     printf("Throughput = %lu bytes/sec\n", (unsigned long)throughput_bps);
-    uint16_t avg_transmissions_per_packet = 0;
-    if (total_received > 0) {
-        avg_transmissions_per_packet = total_transmissions / total_received;
-    }
-    printf("Average number of transmissions per packet: %u\n", avg_transmissions_per_packet);
-    printf("Packets dropped after exceeding max retries (%d): %u\n", MAX_RETRIES, total_dropped_max_retries);
+uint32_t avg_transmissions_per_packet = 0;
+if (total_received > 0) {
+    avg_transmissions_per_packet = total_transmissions / total_received;
+}
+printf("Average number of transmissions per packet: %lu\n", (unsigned long)avg_transmissions_per_packet);
+    printf("Packets dropped after exceeding max retries (%d): %lu\n",
+           MAX_RETRIES, (unsigned long)total_dropped_max_retries);
     vTaskEndScheduler();
 }
 
 void CheckAndReportStatsAndStop(void) {
-    static uint8_t reported = 0;
+    static bool reported = false;
     if (reported) return;
 
     xSemaphoreTake(stats_mutex, portMAX_DELAY);
-    uint16_t total = total_received + total_lost;
-    xSemaphoreGive(stats_mutex);
+    int32_t total = total_received + total_lost;
+ xSemaphoreGive(stats_mutex);
 
     if (total >= NO_OF_PACKETS) {
-        reported = 1;
+        reported = true;
         print_final_stats();
+
         vTaskEndScheduler();
     }
 }
-
 
 // ----------------------------------------------------------------------------
 // Sender
@@ -207,7 +213,7 @@ void SenderTimeoutCallback(TimerHandle_t xTimer) {
             continue;
         }
 
-    
+
         printf("Sender %ld: Timeout, retransmitting seq %ld (retry %d)\n",
                (long)fromSender,
                (long)inflight[idx2].pkt->seq,
@@ -215,7 +221,7 @@ void SenderTimeoutCallback(TimerHandle_t xTimer) {
         total_transmissions++;
         xQueueSend(qToSwitch, &inflight[idx2].pkt, 0);
 
-       
+
         if (seq == windowBase) {
             xTimerStop(inflight[idx2].timer, 0);
             xTimerChangePeriod(inflight[idx2].timer, pdMS_TO_TICKS(TIMEOUT_PERIOD), 0);
@@ -242,7 +248,7 @@ void send_and_buffer(SenderState *state, Packet *pkt) {
     inflight[idx].awaiting_ack  = true;
     inflight[idx].ownerSenderId = pkt->from;
 
-   
+
     inflight[idx].timer = xTimerCreate(
         "PktTimer",
         pdMS_TO_TICKS(TIMEOUT_PERIOD),
@@ -276,7 +282,7 @@ void handle_ack(SenderState *state, int32_t ack_seq) {
 
     int32_t dest = inflight[idx0].pkt->to;  // either 3 or 4
 
-  
+
     if (dest == 3) {
         if (ack_seq >= state->base3) {
             for (int32_t seq = state->base3; seq <= ack_seq; ++seq) {
@@ -343,14 +349,14 @@ void SenderTimerCallback(TimerHandle_t xTimer) {
         int r     = rand() % range;
         pkt->size = HEADER_SIZE_BYTES + (L1_BYTES + r);
         pkt->seq  = seqToSend;
-        
+
         set_random_packet_data(pkt);
         pkt->retries = 0;
 
         send_and_buffer(state, pkt);
     }
     else {
-  
+
         xSemaphoreGive(stats_mutex);
     }
 
@@ -401,15 +407,15 @@ void SwitchForwardCallback(TimerHandle_t xTimer) {
         printf("switch send : to=%d from=%d seq=%ld data=\"%s\"\n",
                delayedPkt->to, delayedPkt->from, (long)delayedPkt->seq, delayedPkt->data);
     }
- 
+
 vPortFree(delayedPkt);
-   
+
 }
 void SwitchTask(void *params) {
     Packet *pkt = NULL;
 
     for (;;) {
-      
+
         if (xQueueReceive(qToSwitch_ForACKs, &pkt, 0) == pdPASS) {
             if ((rand() % P_DROP_SCALE) < P_ACK) {
                 printf("Switch: DROPPED ACK seq=%ld\n", pkt->seq);
@@ -430,7 +436,7 @@ void SwitchTask(void *params) {
             continue;
         }
 
-  
+
         if (xQueueReceive(qToSwitch, &pkt, portMAX_DELAY) == pdPASS) {
             if (pkt->isAck) {
                 vPortFree(pkt);
@@ -445,7 +451,7 @@ void SwitchTask(void *params) {
                 continue;
             }
 
-      
+
             unsigned long numerator   = (unsigned long)pkt->size * 8UL * 1000UL;
             unsigned long tx_delay_ms = (numerator + C_LINK_CAPACITY - 1) / C_LINK_CAPACITY;
             unsigned long total_delay_ms = PROP_DELAY_MS + tx_delay_ms;
@@ -496,7 +502,7 @@ void ReceiverTask(void *parameters) {
                 }
                 expectedSeq++;
             }
-          
+
 
             Packet *ackPkt = (Packet *)pvPortMalloc(sizeof(Packet));
             if (ackPkt) {
@@ -558,7 +564,7 @@ int main(int argc, char* argv[]) {
     xTaskCreate(SwitchTask,   "Switch",    1024, NULL,        1, NULL);
 
     startTick = xTaskGetTickCount();
-    vTaskStartScheduler(); 
+    vTaskStartScheduler();
 
     return 0;
 }
@@ -566,7 +572,7 @@ int main(int argc, char* argv[]) {
 #pragma GCC diagnostic pop
 
 // ----------------------------------------------------------------------------
-void vApplicationMallocFailedHook(void) {
+void vApplicationMallocFailedHook(void) { printf("stack overflow\n");
     for (;;) ;
 }
 
