@@ -2,344 +2,208 @@
 
 
 
-
-
 #include <stdio.h>
 #include <stdlib.h>
-#include "diag/trace.h"
+#include <string.h>
 #include "FreeRTOS.h"
 #include "task.h"
 #include "queue.h"
 #include "timers.h"
-#include <string.h>
 #include "semphr.h"
 
-#define CCM_RAM __attribute__((section(".ccmram")))
-
-#include "led.h"
-
-#define HEADER_SIZE_BYTES   20
-#define L1_BYTES            500
-#define L2_BYTES            1500
-#define PACKET_GEN_INTERVAL 200
-#define TIMEOUT_PERIOD      150
-#define MAX_RETRIES         4
-#define C_LINK_CAPACITY     100000
-#define PROP_DELAY_MS       5
-#define P_DROP_PERCENT      1
-#define P_DROP_SCALE        100
-#define P_ACK               1
-#define QUEUE_SIZE          200
-#define PACKET_DATA_LEN     32
-#define NO_OF_PACKETS       2000
-
-#pragma GCC diagnostic push
-#pragma GCC diagnostic ignored "-Wunused-parameter"
-#pragma GCC diagnostic ignored "-Wmissing-declarations"
-#pragma GCC diagnostic ignored "-Wreturn-type"
+#define MAX_INFLIGHT 8
+#define MAX_RETRIES 4
+#define PACKET_DATA_LEN 32
+#define QUEUE_SIZE 20
+#define K 40 // ACK size
+#define TIMEOUT_PERIOD 150
+#define NO_OF_PACKETS 2000
 
 typedef struct {
-    int32_t from, to;
-    int32_t seq;
+    int32_t from, to, seq;
     int16_t size, retries;
-    bool    isAck;
-    char    data[PACKET_DATA_LEN];
+    bool isAck;
+    char data[PACKET_DATA_LEN];
 } Packet;
 
 typedef struct {
+    Packet *pkt;
+    TimerHandle_t timer;
+    int retries;
+    bool awaiting_ack;
+} InflightEntry;
+
+typedef struct {
     int32_t myId;
-    int32_t seq3;
-    int32_t seq4;
+    int32_t seq3, seq4;
 } SenderState;
 
-static bool rx3_seenSeq[NO_OF_PACKETS];
-static bool rx4_seenSeq[NO_OF_PACKETS];
-static QueueHandle_t qToSwitch, qToRx3, qToRx4 , qToSwitch_ForACKs , qToSender1 , qToSender2 ;
+static InflightEntry inflight[MAX_INFLIGHT];
+static QueueHandle_t qToSwitch, qToRx3, qToRx4, qToSwitchForACKs, qToSender1, qToSender2;
 static SemaphoreHandle_t stats_mutex;
-
-static int32_t total_received = 0;
-static int32_t total_lost = 0;
-static uint32_t total_bytes_received = 0;
-static TickType_t startTick = 0;
 static SenderState senderStates[2];
+static bool rx3_seenSeq[NO_OF_PACKETS], rx4_seenSeq[NO_OF_PACKETS];
+static int32_t total_received=0, total_lost=0;
+static uint32_t total_bytes_received=0;
 
 const char* message_pool[] = {
-    "eyad",
-    "abdelrahman",
-    "second year",
-    "embeded project",
-    "Dr.Khaled Fouad",
-    "cairo university"
+    "eyad", "abdelrahman", "second year", "embeded project", "Dr.Khaled Fouad", "cairo university"
 };
 #define MESSAGE_POOL_SIZE (sizeof(message_pool)/sizeof(message_pool[0]))
 
 void set_random_packet_data(Packet* pkt) {
-    if (!pkt) return;
     int idx = rand() % MESSAGE_POOL_SIZE;
-    strncpy(pkt->data, message_pool[idx], PACKET_DATA_LEN - 1);
-    pkt->data[PACKET_DATA_LEN - 1] = '\0';
+    strncpy(pkt->data, message_pool[idx], PACKET_DATA_LEN-1);
+    pkt->data[PACKET_DATA_LEN-1] = '\0';
 }
 
-void print_final_stats(void) {
-    int32_t total = total_received + total_lost;
-    int32_t pct_int = 0, pct_frac = 0;
+int find_empty_inflight(void) {
+    for (int i=0; i<MAX_INFLIGHT; ++i) if (!inflight[i].awaiting_ack) return i;
+    return -1;
+}
+int find_by_seq(int to, int seq) {
+    for (int i=0; i<MAX_INFLIGHT; ++i)
+        if (inflight[i].awaiting_ack && inflight[i].pkt->to == to && inflight[i].pkt->seq == seq)
+            return i;
+    return -1;
+}
 
-    if (total > 0) {
-        int32_t pct_percent = (10000 * total_lost) / total;
-        pct_int = pct_percent / 100;
-        pct_frac = pct_percent % 100;
-    }
-
-    printf("=== Simulation Complete ===\n");
-    printf("Total received packets: %ld\n", (long)total_received);
-    printf("Total lost packets: %ld\n", (long)total_lost);
-    printf("Loss percentage: %ld.%02ld%%\n", (long)pct_int, (long)pct_frac);
-
-    TickType_t endTick = xTaskGetTickCount();
-    TickType_t deltaTicks = endTick - startTick;
-    if (deltaTicks == 0) {
-        printf("Throughput = 0 bytes/sec (elapsed time = 0 ticks)\n");
+void SenderTimeoutCallback(TimerHandle_t xTimer) {
+    int idx = (int)pvTimerGetTimerID(xTimer);
+    if (!inflight[idx].awaiting_ack) return;
+    inflight[idx].retries++;
+    if (inflight[idx].retries > MAX_RETRIES) {
+        printf("Sender: max retries, dropping seq %ld\n", (long)inflight[idx].pkt->seq);
+        vPortFree(inflight[idx].pkt);
+        inflight[idx].awaiting_ack = false;
+        xTimerDelete(inflight[idx].timer, 0);
         return;
     }
-    uint32_t throughput_bps = ((uint32_t)total_bytes_received * (uint32_t)configTICK_RATE_HZ) / (uint32_t)deltaTicks;
-    printf("Throughput = %lu bytes/sec\n", (unsigned long)throughput_bps);
-    vTaskEndScheduler();
+    printf("Sender: retransmitting seq %ld (retry %d)\n", (long)inflight[idx].pkt->seq, inflight[idx].retries);
+    xQueueSend(qToSwitch, &inflight[idx].pkt, 0);
+    xTimerStart(inflight[idx].timer, 0);
 }
 
-void CheckAndReportStatsAndStop(void) {
-    static bool reported = false;
-    if (reported) return;
+void send_and_buffer(SenderState* state, Packet* pkt) {
+    int idx = find_empty_inflight();
+    if (idx < 0) { vPortFree(pkt); return; }
+    inflight[idx].pkt = pkt;
+    inflight[idx].awaiting_ack = true;
+    inflight[idx].retries = 0;
+    inflight[idx].timer = xTimerCreate("PktTimer", pdMS_TO_TICKS(TIMEOUT_PERIOD), pdFALSE, (void*)idx, SenderTimeoutCallback);
+    xQueueSend(qToSwitch, &pkt, 0);
+    xTimerStart(inflight[idx].timer, 0);
+}
 
-    xSemaphoreTake(stats_mutex, portMAX_DELAY);
-    int32_t total = total_received + total_lost;
-    if (total >= NO_OF_PACKETS) {
-        reported = true;
-        print_final_stats();
-        xSemaphoreGive(stats_mutex);
-        vTaskEndScheduler();
-    } else {
-        xSemaphoreGive(stats_mutex);
-    }
+void handle_ack(int from, int seq) {
+    int idx = find_by_seq(from, seq);
+    if (idx < 0) return;
+    inflight[idx].awaiting_ack = false;
+    xTimerDelete(inflight[idx].timer, 0);
+    vPortFree(inflight[idx].pkt);
 }
 
 void SenderTimerCallback(TimerHandle_t xTimer) {
-    SenderState *state = (SenderState *)pvTimerGetTimerID(xTimer);
-    Packet *pkt = (Packet *)pvPortMalloc(sizeof(Packet));
-    if (!pkt) return;
-
+    SenderState* state = (SenderState*)pvTimerGetTimerID(xTimer);
+    Packet* pkt = (Packet*)pvPortMalloc(sizeof(Packet));
     pkt->from = state->myId;
-    pkt->to = (rand() % 2 == 0) ? 3 : 4;
-    int range = L2_BYTES - L1_BYTES + 1;
-    int r = rand() % range;
-    pkt->size = HEADER_SIZE_BYTES + (L1_BYTES + r);
-
+    pkt->to = (rand()%2==0) ? 3 : 4;
+    pkt->seq = (pkt->to == 3) ? state->seq3++ : state->seq4++;
+    pkt->size = 100; // for demo
     pkt->retries = 0;
     pkt->isAck = false;
     set_random_packet_data(pkt);
-
-    xSemaphoreTake(stats_mutex, portMAX_DELAY);
-    if (pkt->to == 3) {
-        pkt->seq = state->seq3++;
-    } else {
-        pkt->seq = state->seq4++;
-    }
-    xSemaphoreGive(stats_mutex);
-
-    if (xQueueSend(qToSwitch, &pkt, 0) == pdPASS) {
-        printf("Sender: sent to switch: from=%d to=%d seq=%ld data=\"%s\"\n",
-            pkt->from, pkt->to, (long)pkt->seq, pkt->data);
-    } else {
-        printf("Sender: Could not send to switch queue.\n");
-        vPortFree(pkt);
-    }
-    int min_ms = 100, max_ms = 200;
-    int range_ms = max_ms - min_ms + 1;
-    int r_ms = (rand() % range_ms) + min_ms;
-    TickType_t newPeriod = pdMS_TO_TICKS(r_ms);
-    xTimerChangePeriod(xTimer, newPeriod, 0);
+    send_and_buffer(state, pkt);
+    int r_ms = 100 + rand()%100;
+    xTimerChangePeriod(xTimer, pdMS_TO_TICKS(r_ms), 0);
 }
 
-void SenderTask(void *parameters) {
-    SenderState *state = (SenderState *)parameters;
-    TimerHandle_t timer = xTimerCreate(
-        "SenderTimer",
-        pdMS_TO_TICKS(PACKET_GEN_INTERVAL),
-        pdFALSE,
-        (void *)state,
-        SenderTimerCallback
-    );
-    if (timer != NULL) {
-        xTimerStart(timer, 0);
+void SenderTask(void* param) {
+    SenderState* state = (SenderState*)param;
+    TimerHandle_t timer = xTimerCreate("SenderTimer", pdMS_TO_TICKS(PACKET_GEN_INTERVAL), pdFALSE, (void*)state, SenderTimerCallback);
+    xTimerStart(timer, 0);
+    Packet* ackPkt = NULL;
+    QueueHandle_t myAckQ = (state->myId==1) ? qToSender1 : qToSender2;
+    for (;;) {
+        if (xQueueReceive(myAckQ, &ackPkt, portMAX_DELAY) == pdPASS) {
+            handle_ack(state->myId, ackPkt->seq);
+            vPortFree(ackPkt);
+        }
     }
-    while (1) vTaskDelay(portMAX_DELAY);
 }
 
-void SwitchForwardCallback(TimerHandle_t xTimer)
-{
-    Packet *delayedPkt = (Packet *)pvTimerGetTimerID(xTimer);
-    if (delayedPkt->to == 3) {
-        xQueueSendToBack(qToRx3, &delayedPkt, 0);
-        printf("switch send to %d: \n", delayedPkt->to);
-    } else if (delayedPkt->to == 4) {
-        xQueueSendToBack(qToRx4, &delayedPkt, 0);
-        printf("switch send to %d: \n", delayedPkt->to);
-    } else {
-        vPortFree(delayedPkt);
-        xTimerDelete(xTimer, 0);
-        return;
-    }
+void SwitchForwardCallback(TimerHandle_t xTimer) {
+    Packet* delayedPkt = (Packet*)pvTimerGetTimerID(xTimer);
+    if (delayedPkt->to == 3) xQueueSendToBack(qToRx3, &delayedPkt, 0);
+    else if (delayedPkt->to == 4) xQueueSendToBack(qToRx4, &delayedPkt, 0);
     xTimerDelete(xTimer, 0);
 }
 
-void SwitchTask(void *params) {
-    Packet *pkt = NULL;
+void SwitchTask(void* param) {
+    Packet* pkt = NULL;
     for (;;) {
         if (xQueueReceive(qToSwitch, &pkt, portMAX_DELAY) == pdPASS) {
             if (pkt->isAck) {
-                if ((rand() % P_DROP_SCALE) < P_ACK) {
-                    printf("Switch: DROPPED ACK seq=%ld\n", pkt->seq);
-                    vPortFree(pkt);
-                    continue;
-                }
-                if (pkt->to == 1) {
-                    xQueueSend(qToSender1, &pkt, 0);
-                    printf("Switch: Forwarded ACK to Sender1 seq=%ld\n", pkt->seq);
-                } else if (pkt->to == 2) {
-                    xQueueSend(qToSender2, &pkt, 0);
-                    printf("Switch: Forwarded ACK to Sender2 seq=%ld\n", pkt->seq);
-                } else {
-                    vPortFree(pkt);
-                }
+                if (pkt->to == 1) xQueueSend(qToSender1, &pkt, 0);
+                else if (pkt->to == 2) xQueueSend(qToSender2, &pkt, 0);
+                else vPortFree(pkt);
                 continue;
             }
-            if ((rand() % P_DROP_SCALE) < P_DROP_PERCENT) {
-                vPortFree(pkt);
-                xSemaphoreTake(stats_mutex, portMAX_DELAY);
-                total_lost++;
-                xSemaphoreGive(stats_mutex);
-                CheckAndReportStatsAndStop();
-                continue;
-            }
-            unsigned long numerator = (unsigned long)pkt->size * 8UL * 1000UL;
-            unsigned long tx_delay_ms = (numerator + C_LINK_CAPACITY - 1) / C_LINK_CAPACITY;
-            unsigned long total_delay_ms = PROP_DELAY_MS + tx_delay_ms;
-            TickType_t totalDelayTicks = pdMS_TO_TICKS((int)total_delay_ms);
-            TimerHandle_t fwdTimer = xTimerCreate(
-                "FwdTimer",
-                totalDelayTicks,
-                pdFALSE,
-                (void *)pkt,
-                SwitchForwardCallback
-            );
-            if (fwdTimer != NULL) {
-                xTimerStart(fwdTimer, 0);
-            } else {
-                vPortFree(pkt);
-                xSemaphoreTake(stats_mutex, portMAX_DELAY);
-                total_lost++;
-                xSemaphoreGive(stats_mutex);
-                CheckAndReportStatsAndStop();
-            }
+            if ((rand()%P_DROP_SCALE) < P_DROP_PERCENT) { vPortFree(pkt); continue; }
+            TimerHandle_t fwdTimer = xTimerCreate("FwdTimer", pdMS_TO_TICKS(10), pdFALSE, (void*)pkt, SwitchForwardCallback);
+            xTimerStart(fwdTimer, 0);
         }
     }
 }
 
-void ReceiverTask(void *parameters) {
-    int32_t myId = (int32_t)parameters;
-    Packet *pkt = NULL;
-    BaseType_t status;
-    int32_t expectedSeq = 0;
+void ReceiverTask(void* param) {
+    int myId = (int)param;
+    Packet* pkt = NULL;
+    bool* seenSeq = (myId==3) ? rx3_seenSeq : rx4_seenSeq;
+    QueueHandle_t inQ = (myId==3) ? qToRx3 : qToRx4;
     for (;;) {
-        if (myId == 3) {
-            status = xQueueReceive(qToRx3, &pkt, portMAX_DELAY);
-        } else {
-            status = xQueueReceive(qToRx4, &pkt, portMAX_DELAY);
-        }
-        if (status == pdPASS) {
-            printf("Packet received: to=%d from=%d seq=%ld data=\"%s\"\n",
-                pkt->to, pkt->from, (long)pkt->seq, pkt->data);
-            expectedSeq = pkt->seq + 1;
-            bool *seenSeq = (myId == 3) ? rx3_seenSeq : rx4_seenSeq;
-
-            // Only mark as seen if in bounds
+        if (xQueueReceive(inQ, &pkt, portMAX_DELAY) == pdPASS) {
             if (pkt->seq >= 0 && pkt->seq < NO_OF_PACKETS && !seenSeq[pkt->seq]) {
                 seenSeq[pkt->seq] = true;
-                xSemaphoreTake(stats_mutex, portMAX_DELAY);
-                total_received++;
-                total_bytes_received += pkt->size;
-                xSemaphoreGive(stats_mutex);
             }
-
-            Packet *ackPkt = (Packet *)pvPortMalloc(sizeof(Packet));
-            if (ackPkt != NULL) {
-                ackPkt->isAck   = true;
-                ackPkt->from    = myId;
-                ackPkt->to      = pkt->from;
-                ackPkt->seq     = pkt->seq;
-                ackPkt->size    = 40;
-                ackPkt->retries = 0;
-                if (xQueueSend(qToSwitch_ForACKs, &ackPkt, 0) != pdPASS) {
-                    vPortFree(ackPkt);
-                }
-            }
+            Packet* ackPkt = (Packet*)pvPortMalloc(sizeof(Packet));
+            ackPkt->isAck = true;
+            ackPkt->from = myId;
+            ackPkt->to = pkt->from;
+            ackPkt->seq = pkt->seq;
+            ackPkt->size = K;
+            ackPkt->retries = 0;
+            xQueueSend(qToSwitch, &ackPkt, 0);
             vPortFree(pkt);
-            CheckAndReportStatsAndStop();
         }
     }
 }
 
-static void setupQueues(void) {
-    qToSwitch = xQueueCreate(QUEUE_SIZE, sizeof(Packet *));
-    qToRx3    = xQueueCreate(QUEUE_SIZE, sizeof(Packet *));
-    qToRx4    = xQueueCreate(QUEUE_SIZE, sizeof(Packet *));
-    qToSwitch_ForACKs   = xQueueCreate(QUEUE_SIZE, sizeof(Packet *));
-    qToSender1          = xQueueCreate(QUEUE_SIZE, sizeof(Packet *));
-    qToSender2          = xQueueCreate(QUEUE_SIZE, sizeof(Packet *));
+void setupQueues(void) {
+    qToSwitch = xQueueCreate(QUEUE_SIZE, sizeof(Packet*));
+    qToRx3 = xQueueCreate(QUEUE_SIZE, sizeof(Packet*));
+    qToRx4 = xQueueCreate(QUEUE_SIZE, sizeof(Packet*));
+    qToSwitchForACKs = xQueueCreate(QUEUE_SIZE, sizeof(Packet*));
+    qToSender1 = xQueueCreate(QUEUE_SIZE, sizeof(Packet*));
+    qToSender2 = xQueueCreate(QUEUE_SIZE, sizeof(Packet*));
 }
 
-int main(int argc, char* argv[]) {
-    srand((unsigned)time(NULL));
+int main() {
     setupQueues();
     stats_mutex = xSemaphoreCreateMutex();
-
-    senderStates[0].myId = 1;
-    senderStates[0].seq3 = 0;
-    senderStates[0].seq4 = 0;
-    senderStates[1].myId = 2;
-    senderStates[1].seq3 = 0;
-    senderStates[1].seq4 = 0;
-
+    senderStates[0].myId=1; senderStates[0].seq3=0; senderStates[0].seq4=0;
+    senderStates[1].myId=2; senderStates[1].seq3=0; senderStates[1].seq4=0;
     xTaskCreate(SenderTask, "Sender1", 2048, &senderStates[0], 1, NULL);
     xTaskCreate(SenderTask, "Sender2", 2048, &senderStates[1], 1, NULL);
     xTaskCreate(ReceiverTask, "Receiver3", 2048, (void*)3, 2, NULL);
     xTaskCreate(ReceiverTask, "Receiver4", 2048, (void*)4, 2, NULL);
     xTaskCreate(SwitchTask, "Switch", 2048, NULL, 1, NULL);
-    startTick = xTaskGetTickCount();
     vTaskStartScheduler();
     return 0;
 }
 
-#pragma GCC diagnostic pop
-
+// Provide stubs for required FreeRTOS hooks
 void vApplicationMallocFailedHook(void) { for(;;); }
-void vApplicationStackOverflowHook(TaskHandle_t pxTask, char *pcTaskName) { (void) pcTaskName; (void) pxTask; for(;;); }
-void vApplicationIdleHook(void) {
-    volatile size_t xFreeStackSpace = xPortGetFreeHeapSize();
-    if (xFreeStackSpace > 100) { /* Heap could be reduced */ }
-}
+void vApplicationStackOverflowHook(TaskHandle_t x, char* y) { for(;;); }
+void vApplicationIdleHook(void) {}
 void vApplicationTickHook(void) {}
-
-StaticTask_t xIdleTaskTCB CCM_RAM;
-StackType_t uxIdleTaskStack[configMINIMAL_STACK_SIZE] CCM_RAM;
-void vApplicationGetIdleTaskMemory(StaticTask_t **ppxIdleTaskTCBBuffer, StackType_t **ppxIdleTaskStackBuffer, uint32_t *pulIdleTaskStackSize) {
-    *ppxIdleTaskTCBBuffer = &xIdleTaskTCB;
-    *ppxIdleTaskStackBuffer = uxIdleTaskStack;
-    *pulIdleTaskStackSize = configMINIMAL_STACK_SIZE;
-}
-static StaticTask_t xTimerTaskTCB CCM_RAM;
-static StackType_t uxTimerTaskStack[configTIMER_TASK_STACK_DEPTH] CCM_RAM;
-void vApplicationGetTimerTaskMemory(StaticTask_t **ppxTimerTaskTCBBuffer, StackType_t **ppxTimerTaskStackBuffer, uint32_t *pulTimerTaskStackSize) {
-    *ppxTimerTaskTCBBuffer = &xTimerTaskTCB;
-    *ppxTimerTaskStackBuffer = uxTimerTaskStack;
-    *pulTimerTaskStackSize = configTIMER_TASK_STACK_DEPTH;
-}
