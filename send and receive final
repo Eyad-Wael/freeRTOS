@@ -23,7 +23,7 @@
 #define HEADER_SIZE_BYTES   20
 #define L1_BYTES            500
 #define L2_BYTES            1500
-#define K                   2 //ack size
+#define K                   40 //ack size
 #define PACKET_GEN_INTERVAL 200 // initially
 #define TIMEOUT_PERIOD      150
 #define MAX_RETRIES         4
@@ -35,8 +35,8 @@
 #define QUEUE_SIZE          20
 #define PACKET_DATA_LEN     32
 #define NO_OF_PACKETS       200 // max no of received packets to print results
-#define MAX_INFLIGHT_PACKETS 5
-#define N                  2    // Window size: 2,4,8,16
+#define MAX_INFLIGHT_PACKETS 20
+#define N                  8    // Window size: 2,4,8,16
 
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wunused-parameter"
@@ -167,15 +167,14 @@ void CheckAndReportStatsAndStop(void) {
 
     xSemaphoreTake(stats_mutex, portMAX_DELAY);
     int32_t total = total_received + total_lost;
+ xSemaphoreGive(stats_mutex);
 
     if (total >= NO_OF_PACKETS) {
         reported = true;
         print_final_stats();
-        xSemaphoreGive(stats_mutex);
+       
         vTaskEndScheduler();
-    } else {
-        xSemaphoreGive(stats_mutex);
-    }
+    } 
 }
 
 // ----------------------------------------------------------------------------
@@ -190,7 +189,7 @@ void SenderTimeoutCallback(TimerHandle_t xTimer) {
 
 
     int32_t windowBase, windowNext;
-    int32_t pktTo = inflight[firingIdx].pkt->to;
+    int16_t pktTo = inflight[firingIdx].pkt->to;
     if (pktTo == 3) {
         windowBase = state->base3;
         windowNext = state->next3;
@@ -260,7 +259,6 @@ void send_and_buffer(SenderState *state, Packet *pkt) {
         SenderTimeoutCallback
     );
     if (!inflight[idx].timer) {
-        // Timer creation failed → drop packet immediately
         vPortFree(pkt);
         return;
     }
@@ -328,14 +326,13 @@ void SenderTimerCallback(TimerHandle_t xTimer) {
 
         Packet *pkt = (Packet *)pvPortMalloc(sizeof(Packet));
         if (!pkt) return;
-
+        pkt->isAck = false;
         pkt->from = state->myId;
         pkt->to   = 3;
         int range = L2_BYTES - L1_BYTES + 1;
         int r     = rand() % range;
         pkt->size = HEADER_SIZE_BYTES + (L1_BYTES + r);
         pkt->seq  = seqToSend;
-        pkt->isAck = false;
         set_random_packet_data(pkt);
         pkt->retries = 0;
 
@@ -347,14 +344,14 @@ void SenderTimerCallback(TimerHandle_t xTimer) {
 
         Packet *pkt = (Packet *)pvPortMalloc(sizeof(Packet));
         if (!pkt) return;
-
+        pkt->isAck = false;
         pkt->from = state->myId;
         pkt->to   = 4;
         int range = L2_BYTES - L1_BYTES + 1;
         int r     = rand() % range;
         pkt->size = HEADER_SIZE_BYTES + (L1_BYTES + r);
         pkt->seq  = seqToSend;
-        pkt->isAck = false;
+        
         set_random_packet_data(pkt);
         pkt->retries = 0;
 
@@ -401,7 +398,7 @@ void SenderTask(void *parameters) {
 
 void SwitchForwardCallback(TimerHandle_t xTimer) {
     Packet *delayedPkt = (Packet *)pvTimerGetTimerID(xTimer);
-
+ xTimerDelete(xTimer, 0);
     if (delayedPkt->to == 3) {
         xQueueSendToBack(qToRx3, &delayedPkt, 0);
         printf("switch send : to=%d from=%d seq=%ld data=\"%s\"\n",
@@ -412,13 +409,9 @@ void SwitchForwardCallback(TimerHandle_t xTimer) {
         printf("switch send : to=%d from=%d seq=%ld data=\"%s\"\n",
                delayedPkt->to, delayedPkt->from, (long)delayedPkt->seq, delayedPkt->data);
     }
-    else {
-        vPortFree(delayedPkt);
-        xTimerDelete(xTimer, 0);
-        return;
-    }
-
-    xTimerDelete(xTimer, 0);
+ 
+vPortFree(delayedPkt);
+   
 }
 void SwitchTask(void *params) {
     Packet *pkt = NULL;
@@ -490,7 +483,7 @@ void SwitchTask(void *params) {
 // Receiver
 
 void ReceiverTask(void *parameters) {
-    int32_t myId = (int32_t)parameters;
+    int16_t myId = (int32_t)parameters;
     Packet *pkt = NULL;
     int32_t expectedSeq = 0;
     bool *seenSeq = (myId == 3) ? rx3_seenSeq : rx4_seenSeq;
@@ -511,7 +504,7 @@ void ReceiverTask(void *parameters) {
                 }
                 expectedSeq++;
             }
-            // If pkt->seq > expectedSeq, drop it and send dup‐ACK for (expectedSeq - 1)
+          
 
             Packet *ackPkt = (Packet *)pvPortMalloc(sizeof(Packet));
             if (ackPkt) {
@@ -566,14 +559,14 @@ int main(int argc, char* argv[]) {
     senderStates[1].base3 = senderStates[1].next3 = 0;
     senderStates[1].base4 = senderStates[1].next4 = 0;
 
-    xTaskCreate(SenderTask,   "Sender1",   2048, &senderStates[0], 1, NULL);
-    xTaskCreate(SenderTask,   "Sender2",   2048, &senderStates[1], 1, NULL);
-    xTaskCreate(ReceiverTask, "Receiver3", 2048, (void*)3,     2, NULL);
-    xTaskCreate(ReceiverTask, "Receiver4", 2048, (void*)4,     2, NULL);
-    xTaskCreate(SwitchTask,   "Switch",    2048, NULL,        1, NULL);
+    xTaskCreate(SenderTask,   "Sender1",   1024, &senderStates[0], 1, NULL);
+    xTaskCreate(SenderTask,   "Sender2",   1024, &senderStates[1], 1, NULL);
+    xTaskCreate(ReceiverTask, "Receiver3", 1024, (void*)3,     2, NULL);
+    xTaskCreate(ReceiverTask, "Receiver4", 1024, (void*)4,     2, NULL);
+    xTaskCreate(SwitchTask,   "Switch",    1024, NULL,        1, NULL);
 
     startTick = xTaskGetTickCount();
-    vTaskStartScheduler();  // never returns
+    vTaskStartScheduler(); 
 
     return 0;
 }
