@@ -188,7 +188,7 @@ void SenderTimeoutCallback(TimerHandle_t xTimer) {
 
     xSemaphoreTake(stats_mutex, portMAX_DELAY);
 
-    // Determine which window: check pkt->to saved in that slot
+
     int32_t windowBase, windowNext;
     int32_t pktTo = inflight[firingIdx].pkt->to;
     if (pktTo == 3) {
@@ -216,7 +216,7 @@ void SenderTimeoutCallback(TimerHandle_t xTimer) {
             continue;
         }
 
-        // Retransmit
+    
         printf("Sender %ld: Timeout, retransmitting seq %ld (retry %d)\n",
                (long)fromSender,
                (long)inflight[idx2].pkt->seq,
@@ -224,7 +224,7 @@ void SenderTimeoutCallback(TimerHandle_t xTimer) {
         total_transmissions++;
         xQueueSend(qToSwitch, &inflight[idx2].pkt, 0);
 
-        // Restart timer only for the base packet (Go‐Back‐N)
+       
         if (seq == windowBase) {
             xTimerStop(inflight[idx2].timer, 0);
             xTimerChangePeriod(inflight[idx2].timer, pdMS_TO_TICKS(TIMEOUT_PERIOD), 0);
@@ -251,7 +251,7 @@ void send_and_buffer(SenderState *state, Packet *pkt) {
     inflight[idx].awaiting_ack  = true;
     inflight[idx].ownerSenderId = pkt->from;
 
-    // Create a one-shot timer for this packet
+   
     inflight[idx].timer = xTimerCreate(
         "PktTimer",
         pdMS_TO_TICKS(TIMEOUT_PERIOD),
@@ -277,16 +277,16 @@ void send_and_buffer(SenderState *state, Packet *pkt) {
 void handle_ack(SenderState *state, int32_t ack_seq) {
     xSemaphoreTake(stats_mutex, portMAX_DELAY);
 
-    // First find which inflight slot matches (senderId, ack_seq)
+
     int idx0 = find_inflight_by_seq(state->myId, ack_seq);
     if (idx0 < 0) {
         xSemaphoreGive(stats_mutex);
         return;
     }
-    // Determine which window that packet belonged to
+
     int32_t dest = inflight[idx0].pkt->to;  // either 3 or 4
 
-    // Advance that window’s base up to ack_seq
+  
     if (dest == 3) {
         if (ack_seq >= state->base3) {
             for (int32_t seq = state->base3; seq <= ack_seq; ++seq) {
@@ -319,7 +319,7 @@ void handle_ack(SenderState *state, int32_t ack_seq) {
 void SenderTimerCallback(TimerHandle_t xTimer) {
     SenderState *state = (SenderState *)pvTimerGetTimerID(xTimer);
 
-    // Try to send one packet if either window (to 3 or to 4) is not full
+
     xSemaphoreTake(stats_mutex, portMAX_DELAY);
 
     if (state->next3 < state->base3 + N) {
@@ -361,11 +361,11 @@ void SenderTimerCallback(TimerHandle_t xTimer) {
         send_and_buffer(state, pkt);
     }
     else {
-        // Both windows full; just release the mutex
+  
         xSemaphoreGive(stats_mutex);
     }
 
-    // Re‐arm the timer with a random interval
+
     int min_ms = 100, max_ms = 200;
     int r_ms = (rand() % (max_ms - min_ms + 1)) + min_ms;
     TickType_t newPeriod = pdMS_TO_TICKS(r_ms);
@@ -376,7 +376,7 @@ void SenderTask(void *parameters) {
     SenderState *state = (SenderState *)parameters;
     QueueHandle_t ackQueue = (state->myId == 1) ? qToSender1 : qToSender2;
 
-    // Create and start the Timer that triggers SenderTimerCallback
+
     TimerHandle_t tgen = xTimerCreate(
         "SenderTimer",
         pdMS_TO_TICKS(PACKET_GEN_INTERVAL),
@@ -424,7 +424,7 @@ void SwitchTask(void *params) {
     Packet *pkt = NULL;
 
     for (;;) {
-        // 1) Drain ACK queue (non-blocking)
+      
         if (xQueueReceive(qToSwitch_ForACKs, &pkt, 0) == pdPASS) {
             if ((rand() % P_DROP_SCALE) < P_ACK) {
                 printf("Switch: DROPPED ACK seq=%ld\n", pkt->seq);
@@ -445,7 +445,7 @@ void SwitchTask(void *params) {
             continue;
         }
 
-        // 2) Block on data queue
+  
         if (xQueueReceive(qToSwitch, &pkt, portMAX_DELAY) == pdPASS) {
             if (pkt->isAck) {
                 vPortFree(pkt);
@@ -460,7 +460,7 @@ void SwitchTask(void *params) {
                 continue;
             }
 
-            // Compute transmission + propagation delay
+      
             unsigned long numerator   = (unsigned long)pkt->size * 8UL * 1000UL;
             unsigned long tx_delay_ms = (numerator + C_LINK_CAPACITY - 1) / C_LINK_CAPACITY;
             unsigned long total_delay_ms = PROP_DELAY_MS + tx_delay_ms;
@@ -557,7 +557,7 @@ int main(int argc, char* argv[]) {
     stats_mutex = xSemaphoreCreateMutex();
     configASSERT(stats_mutex);
 
-    // Initialize both senders
+
     senderStates[0].myId  = 1;
     senderStates[0].base3 = senderStates[0].next3 = 0;
     senderStates[0].base4 = senderStates[0].next4 = 0;
