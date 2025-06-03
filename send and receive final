@@ -1,5 +1,5 @@
 // ----------------------------------------------------------------------------
-// Two‐Sender, Two‐Receiver Sliding‐Window Simulation (with S&W/Go‐Back‐N comments removed)
+// Two‐Sender, Two‐Receiver Sliding‐Window Simulation
 // ----------------------------------------------------------------------------
 
 #include <stdio.h>
