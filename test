@@ -35,7 +35,7 @@
 #define PACKET_DATA_LEN     20
 #define NO_OF_PACKETS       100
 #define MAX_NO_OF_PACKETS   100
-#define TX_BUFFER_SIZE 		20
+#define TX_BUFFER_SIZE      20
 
 // Type Definitions
 typedef struct {
@@ -97,7 +97,6 @@ int txbuf_find_seq(SenderState *state, int32_t seq) {
     return -1;
 }
 
-// Fixed cleanup function with proper memory management
 void txbuf_remove(SenderState *state, int idx) {
     if (state->txbuf[idx].timer) { 
         TimerInfo *info = (TimerInfo *) pvTimerGetTimerID(state->txbuf[idx].timer);
@@ -170,7 +169,7 @@ static void CheckAndReportStatsAndStop(void) {
     }
 }
 
-// Fixed retransmission callback with proper error handling
+// Fixed retransmission callback
 void SenderRetransmitCallback(TimerHandle_t t) {
     TimerInfo *info = (TimerInfo *)pvTimerGetTimerID(t);
     SenderState *state = info->state;
@@ -205,7 +204,7 @@ void SenderRetransmitCallback(TimerHandle_t t) {
         return;
     }
     
-    // Create new packet for retransmission (don't reuse the buffered one)
+    // Create new packet for retransmission
     Packet *retrans_pkt = (Packet *)pvPortMalloc(sizeof(Packet));
     if (retrans_pkt) {
         memcpy(retrans_pkt, state->txbuf[slot].pkt, sizeof(Packet));
@@ -407,21 +406,6 @@ static void SenderTask(void *parameters) {
 }
 
 // Fixed switch task with proper timing
-static void SwitchForwardCallback(TimerHandle_t xTimer) {
-    Packet *delayedPkt = (Packet *)pvTimerGetTimerID(xTimer);
-    TickType_t now = xTaskGetTickCount();
-    printf("SwitchForwardCallback: firing at tick %lu, forwarding seq=%ld to %d\n",
-           (unsigned long)now, (long)delayedPkt->seq, delayedPkt->to);
-
-    xTimerDelete(xTimer, 0);
-
-    QueueHandle_t targetQueue = (delayedPkt->to == 3) ? qToRx3 : qToRx4;
-    if (xQueueSend(targetQueue, &delayedPkt, 0) != pdPASS) {
-        vPortFree(delayedPkt);
-        printf("Switch: Failed to forward packet to %d\n", delayedPkt->to);
-    }
-}
-
 static void SwitchTask(void *params) {
     Packet *pkt = NULL;
 
