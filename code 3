@@ -2,8 +2,6 @@
 
 
 
-
-
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdbool.h>
@@ -37,7 +35,7 @@
 #define PACKET_DATA_LEN     32
 #define NO_OF_PACKETS       200
 #define TX_BUFFER_SIZE 		10
-#define N                   1    // Window size: 2,4,8,16
+#define N                   4    // Window size: 2,4,8,16 - increased for better performance
 
 // ----------------------------------------------------------------------------
 // Type Definitions
@@ -232,6 +230,11 @@ void SenderRetransmitCallback(TimerHandle_t t) {
            (long)state->txbuf[slot].pkt->seq, state->txbuf[slot].retries);
     
     xQueueSend(qToSwitch, &state->txbuf[slot].pkt, 0);
+    
+    xSemaphoreTake(stats_mutex, portMAX_DELAY);
+    total_transmissions++;
+    xSemaphoreGive(stats_mutex);
+    
     xTimerStart(state->txbuf[slot].timer, 0); // restart timer
     
     xSemaphoreGive(buf_mutex);
@@ -294,16 +297,21 @@ static void send_and_buffer(SenderState *state, Packet *pkt) {
     xSemaphoreGive(stats_mutex);
 
     xTimerStart(state->txbuf[idx].timer, 0);
+    
+    printf("DEBUG: Sender %ld sent packet seq=%ld to receiver %ld\n", 
+           (long)state->myId, (long)pkt->seq, (long)pkt->to);
 }
 
 static void SenderTimerCallback(TimerHandle_t xTimer) {
     SenderState *state = (SenderState *)pvTimerGetTimerID(xTimer);
     printf("DEBUG: SenderTimerCallback fired for Sender %ld\n", (long)state->myId);
     
+    xSemaphoreTake(buf_mutex, portMAX_DELAY);
+    
     int sent = 0;
     
     // Check if we can send to receiver 3
-    if (state->next3 < state->base3 + N) {
+    if (state->next3 < state->base3 + N && state->next3 < NO_OF_PACKETS) {
         int32_t seqToSend = state->next3++;
         
         Packet *pkt = (Packet *)pvPortMalloc(sizeof(Packet));
@@ -318,15 +326,19 @@ static void SenderTimerCallback(TimerHandle_t xTimer) {
             set_random_packet_data(pkt);
             pkt->retries = 0;
             
-            xSemaphoreTake(buf_mutex, portMAX_DELAY);
             send_and_buffer(state, pkt);
-            xSemaphoreGive(buf_mutex);
             sent = 1;
+            
+            printf("DEBUG: Sender %ld generated packet seq=%ld to receiver 3 (window: base=%ld, next=%ld)\n", 
+                   (long)state->myId, (long)seqToSend, (long)state->base3, (long)state->next3);
         }
+    } else {
+        printf("DEBUG: Sender %ld cannot send to receiver 3 (window full or complete): next=%ld, base=%ld, limit=%ld\n", 
+               (long)state->myId, (long)state->next3, (long)state->base3, (long)(state->base3 + N));
     }
     
     // Check if we can send to receiver 4
-    if (state->next4 < state->base4 + N) {
+    if (state->next4 < state->base4 + N && state->next4 < NO_OF_PACKETS) {
         int32_t seqToSend = state->next4++;
         
         Packet *pkt = (Packet *)pvPortMalloc(sizeof(Packet));
@@ -341,12 +353,18 @@ static void SenderTimerCallback(TimerHandle_t xTimer) {
             set_random_packet_data(pkt);
             pkt->retries = 0;
             
-            xSemaphoreTake(buf_mutex, portMAX_DELAY);
             send_and_buffer(state, pkt);
-            xSemaphoreGive(buf_mutex);
             sent = 1;
+            
+            printf("DEBUG: Sender %ld generated packet seq=%ld to receiver 4 (window: base=%ld, next=%ld)\n", 
+                   (long)state->myId, (long)seqToSend, (long)state->base4, (long)state->next4);
         }
+    } else {
+        printf("DEBUG: Sender %ld cannot send to receiver 4 (window full or complete): next=%ld, base=%ld, limit=%ld\n", 
+               (long)state->myId, (long)state->next4, (long)state->base4, (long)(state->base4 + N));
     }
+    
+    xSemaphoreGive(buf_mutex);
 
     // Set random interval for next packet generation
     int min_ms = 100, max_ms = 200;
@@ -373,31 +391,55 @@ static void SenderTask(void *parameters) {
     for (;;) {
     	if (xQueueReceive(ackQueue, &ackPkt, portMAX_DELAY) == pdPASS) {
     	    if (ackPkt) {
-                printf("DEBUG: Sender %ld received ACK seq=%ld from=%d\n", 
+                printf("DEBUG: Sender %ld received ACK seq=%ld from receiver %d\n", 
                        (long)state->myId, (long)ackPkt->seq, ackPkt->from);
                 
                 xSemaphoreTake(buf_mutex, portMAX_DELAY);
                 
-                // Remove acknowledged packets (cumulative ACK)
-                for (int i = 0; i < TX_BUFFER_SIZE; ++i) {
-                    if (state->txbuf[i].in_use && state->txbuf[i].pkt &&
-                        state->txbuf[i].pkt->to == ackPkt->from &&
-                        state->txbuf[i].pkt->seq <= ackPkt->seq) {
-                        printf("DEBUG: Removing ACKed packet seq=%ld\n", 
-                               (long)state->txbuf[i].pkt->seq);
-                        txbuf_remove(state, i);
+                // Process ACK based on which receiver sent it
+                if (ackPkt->from == 3) {
+                    // ACK from receiver 3
+                    printf("DEBUG: Processing ACK from receiver 3, current base3=%ld, ACK seq=%ld\n", 
+                           (long)state->base3, (long)ackPkt->seq);
+                    
+                    // Remove acknowledged packets (cumulative ACK)
+                    for (int i = 0; i < TX_BUFFER_SIZE; ++i) {
+                        if (state->txbuf[i].in_use && state->txbuf[i].pkt &&
+                            state->txbuf[i].pkt->to == 3 &&
+                            state->txbuf[i].pkt->seq <= ackPkt->seq) {
+                            printf("DEBUG: Removing ACKed packet seq=%ld to receiver 3\n", 
+                                   (long)state->txbuf[i].pkt->seq);
+                            txbuf_remove(state, i);
+                        }
                     }
-                }
-
-                // Update base pointers
-                if (ackPkt->to == state->myId && ackPkt->from == 3) {
-                    if (ackPkt->seq >= state->base3) {
+                    
+                    // Update base pointer
+                    if (ackPkt->seq >= state->base3 - 1) {
                         state->base3 = ackPkt->seq + 1;
+                        printf("DEBUG: Updated base3 to %ld\n", (long)state->base3);
                     }
                 }
-                if (ackPkt->to == state->myId && ackPkt->from == 4) {
-                    if (ackPkt->seq >= state->base4) {
+                
+                if (ackPkt->from == 4) {
+                    // ACK from receiver 4
+                    printf("DEBUG: Processing ACK from receiver 4, current base4=%ld, ACK seq=%ld\n", 
+                           (long)state->base4, (long)ackPkt->seq);
+                    
+                    // Remove acknowledged packets (cumulative ACK)
+                    for (int i = 0; i < TX_BUFFER_SIZE; ++i) {
+                        if (state->txbuf[i].in_use && state->txbuf[i].pkt &&
+                            state->txbuf[i].pkt->to == 4 &&
+                            state->txbuf[i].pkt->seq <= ackPkt->seq) {
+                            printf("DEBUG: Removing ACKed packet seq=%ld to receiver 4\n", 
+                                   (long)state->txbuf[i].pkt->seq);
+                            txbuf_remove(state, i);
+                        }
+                    }
+                    
+                    // Update base pointer
+                    if (ackPkt->seq >= state->base4 - 1) {
                         state->base4 = ackPkt->seq + 1;
+                        printf("DEBUG: Updated base4 to %ld\n", (long)state->base4);
                     }
                 }
                 
@@ -596,6 +638,7 @@ int main(int argc, char* argv[]) {
     senderStates[1].base3 = senderStates[1].next3 = 0;
     senderStates[1].base4 = senderStates[1].next4 = 0;
 
+ 
     xTaskCreate(SenderTask, "Sender1", 1024, &senderStates[0], 1, NULL);
     xTaskCreate(SenderTask, "Sender2", 1024, &senderStates[1], 1, NULL);
     xTaskCreate(ReceiverTask, "Receiver3", 1024, (void*)3, 2, NULL);
