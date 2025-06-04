@@ -4,9 +4,6 @@
 
 
 
-
-
-
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdbool.h>
@@ -62,6 +59,8 @@ typedef struct {
     int32_t myId;
     int32_t seq3, seq4;
     TxSlot txbuf[TX_BUFFER_SIZE];
+    // Fixed: Add ACK tracking to prevent duplicate processing
+    int32_t last_acked_seq3, last_acked_seq4;
 } SenderState;
 
 typedef struct { 
@@ -236,7 +235,7 @@ void SenderRetransmitCallback(TimerHandle_t t) {
 }
 
 static void send_and_buffer(SenderState *state, Packet *pkt) {
-    printf("DEBUG: Send and buffer\n");
+    printf("DEBUG: Send and buffer seq=%ld to receiver %d\n", (long)pkt->seq, pkt->to);
 
     int idx = -1;
     xSemaphoreTake(buf_mutex, portMAX_DELAY);
@@ -321,7 +320,8 @@ static void SenderTimerCallback(TimerHandle_t xTimer) {
     );
     xTimerStart(tgen, 0);
 
-    printf("DEBUG: SenderTimerCallback fired for Sender %ld\n", (long)state->myId);
+    printf("DEBUG: SenderTimerCallback fired for Sender %ld (seq3=%ld, seq4=%ld)\n", 
+           (long)state->myId, (long)state->seq3, (long)state->seq4);
     
     xSemaphoreTake(buf_mutex, portMAX_DELAY);
     
@@ -333,6 +333,8 @@ static void SenderTimerCallback(TimerHandle_t xTimer) {
             if (state->txbuf[i].pkt->to == 4) found4 = true;
         }
     }
+    
+    printf("DEBUG: Sender %ld - found3=%d, found4=%d\n", (long)state->myId, found3, found4);
     
     if (!found3) {
         int32_t seqToSend = state->seq3;
@@ -348,6 +350,7 @@ static void SenderTimerCallback(TimerHandle_t xTimer) {
             set_random_packet_data(pkt3);
             pkt3->retries = 0;
             
+            printf("DEBUG: Creating packet to receiver 3 with seq=%ld\n", (long)seqToSend);
             xSemaphoreGive(buf_mutex);
             send_and_buffer(state, pkt3);
             xSemaphoreTake(buf_mutex, portMAX_DELAY);
@@ -368,6 +371,7 @@ static void SenderTimerCallback(TimerHandle_t xTimer) {
             set_random_packet_data(pkt);
             pkt->retries = 0;
             
+            printf("DEBUG: Creating packet to receiver 4 with seq=%ld\n", (long)seqToSend);
             xSemaphoreGive(buf_mutex);
             send_and_buffer(state, pkt);
             xSemaphoreTake(buf_mutex, portMAX_DELAY);
@@ -381,6 +385,10 @@ static void SenderTask(void *parameters) {
     SenderState *state = (SenderState *)parameters;
     QueueHandle_t ackQueue = (state->myId == 1) ? qToSender1 : qToSender2;
     Packet *ackPkt = NULL;
+    
+    // Fixed: Initialize ACK tracking
+    state->last_acked_seq3 = -1;
+    state->last_acked_seq4 = -1;
     
     TimerHandle_t tgen = xTimerCreate(
         "SenderTimer",
@@ -404,19 +412,38 @@ static void SenderTask(void *parameters) {
             
             xSemaphoreTake(buf_mutex, portMAX_DELAY);
 
-            // Fixed: Find and remove the acknowledged packet from buffer
+            // Fixed: Check for duplicate ACK processing
+            bool is_duplicate_ack = false;
+            if (ackPkt->from == 3 && ackPkt->seq <= state->last_acked_seq3) {
+                is_duplicate_ack = true;
+            }
+            if (ackPkt->from == 4 && ackPkt->seq <= state->last_acked_seq4) {
+                is_duplicate_ack = true;
+            }
+            
+            if (is_duplicate_ack) {
+                printf("DEBUG: Duplicate ACK detected for seq %ld from receiver %d - ignoring\n", 
+                       (long)ackPkt->seq, ackPkt->from);
+                xSemaphoreGive(buf_mutex);
+                vPortFree(ackPkt);
+                continue;
+            }
+
+            // Find and remove the acknowledged packet from buffer
             int slot = txbuf_find_seq(state, ackPkt->seq, ackPkt->from);
             if (slot >= 0) {
                 printf("ACK received for seq %ld from receiver %d - removing from buffer\n", 
                        (long)ackPkt->seq, ackPkt->from);
                 
-                // Fixed: Increment sequence numbers only on successful ACK
+                // Fixed: Increment sequence numbers and update last ACKed tracking
                 if (ackPkt->from == 3) {
                     state->seq3++;
+                    state->last_acked_seq3 = ackPkt->seq;
                     printf("DEBUG: Incremented seq3 to %ld\n", (long)state->seq3);
                 }
                 if (ackPkt->from == 4) {
                     state->seq4++;
+                    state->last_acked_seq4 = ackPkt->seq;
                     printf("DEBUG: Incremented seq4 to %ld\n", (long)state->seq4);
                 }
                 
