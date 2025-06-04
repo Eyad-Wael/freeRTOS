@@ -4,6 +4,9 @@
 
 
 
+
+
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdbool.h>
@@ -59,8 +62,8 @@ typedef struct {
     int32_t myId;
     int32_t seq3, seq4;
     TxSlot txbuf[TX_BUFFER_SIZE];
-    // Fixed: Add ACK tracking to prevent duplicate processing
-    int32_t last_acked_seq3, last_acked_seq4;
+    // Fixed: Track highest ACKed sequence numbers
+    int32_t highest_acked_seq3, highest_acked_seq4;
 } SenderState;
 
 typedef struct { 
@@ -387,8 +390,8 @@ static void SenderTask(void *parameters) {
     Packet *ackPkt = NULL;
     
     // Fixed: Initialize ACK tracking
-    state->last_acked_seq3 = -1;
-    state->last_acked_seq4 = -1;
+    state->highest_acked_seq3 = -1;
+    state->highest_acked_seq4 = -1;
     
     TimerHandle_t tgen = xTimerCreate(
         "SenderTimer",
@@ -412,12 +415,12 @@ static void SenderTask(void *parameters) {
             
             xSemaphoreTake(buf_mutex, portMAX_DELAY);
 
-            // Fixed: Check for duplicate ACK processing
+            // Fixed: Check for duplicate ACK processing FIRST
             bool is_duplicate_ack = false;
-            if (ackPkt->from == 3 && ackPkt->seq <= state->last_acked_seq3) {
+            if (ackPkt->from == 3 && ackPkt->seq <= state->highest_acked_seq3) {
                 is_duplicate_ack = true;
             }
-            if (ackPkt->from == 4 && ackPkt->seq <= state->last_acked_seq4) {
+            if (ackPkt->from == 4 && ackPkt->seq <= state->highest_acked_seq4) {
                 is_duplicate_ack = true;
             }
             
@@ -435,16 +438,18 @@ static void SenderTask(void *parameters) {
                 printf("ACK received for seq %ld from receiver %d - removing from buffer\n", 
                        (long)ackPkt->seq, ackPkt->from);
                 
-                // Fixed: Increment sequence numbers and update last ACKed tracking
+                // Fixed: Update highest ACKed tracking BEFORE incrementing
                 if (ackPkt->from == 3) {
+                    state->highest_acked_seq3 = ackPkt->seq;
                     state->seq3++;
-                    state->last_acked_seq3 = ackPkt->seq;
-                    printf("DEBUG: Incremented seq3 to %ld\n", (long)state->seq3);
+                    printf("DEBUG: Incremented seq3 to %ld (highest_acked=%ld)\n", 
+                           (long)state->seq3, (long)state->highest_acked_seq3);
                 }
                 if (ackPkt->from == 4) {
+                    state->highest_acked_seq4 = ackPkt->seq;
                     state->seq4++;
-                    state->last_acked_seq4 = ackPkt->seq;
-                    printf("DEBUG: Incremented seq4 to %ld\n", (long)state->seq4);
+                    printf("DEBUG: Incremented seq4 to %ld (highest_acked=%ld)\n", 
+                           (long)state->seq4, (long)state->highest_acked_seq4);
                 }
                 
                 txbuf_remove(state, slot);
