@@ -79,8 +79,10 @@ typedef struct {
     TimerHandle_t timer;
 
 } BUFFER;
-
 typedef struct {
+    int32_t myId;
+    int32_t seq3, seq4;
+      bool seenSeq[TARGET_RECEIVED_PACKETS * 4];
     int32_t myId;
     int32_t send_base;     
     int32_t nextseqnum;     
