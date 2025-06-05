@@ -577,6 +577,103 @@ void PacketTimeoutCallback_GBN_Hybrid(TimerHandle_t xTimer) {
     xSemaphoreGive(buf_mutex);
 }
 
+void SenderTimerCallback_SW(TimerHandle_t xTimer) {
+    SenderState *state = (SenderState *)pvTimerGetTimerID(xTimer);
+
+    printf("Sender %d: S&W Timer callback\n", state->myId);
+
+    // Check if we're waiting for ACK (S&W protocol)
+    xSemaphoreTake(buf_mutex, portMAX_DELAY);
+    bool hasUnackedPackets = false;
+    for (int i = 0; i < BUFFER_ARR; ++i) {
+        if (buf_arr[i].in_use && buf_arr[i].from == state->myId) {
+            hasUnackedPackets = true;
+            break;
+        }
+    }
+    xSemaphoreGive(buf_mutex);
+
+    if (hasUnackedPackets) {
+        printf("Sender %d: S&W - Waiting for ACK, not sending new packet\n", state->myId);
+        int next_interval = T1_MIN_MS + (rand() % (T2_MAX_MS - T1_MIN_MS + 1));
+        xTimerChangePeriod(xTimer, pdMS_TO_TICKS(next_interval), 0);
+        return;
+    }
+
+    // Dynamically allocate packet
+    Packet *pkt = (Packet*)pvPortMalloc(sizeof(Packet));
+    if (!pkt) {
+        printf("Sender %d: S&W - Failed to allocate packet memory\n", state->myId);
+        return;
+    }
+
+    // Get buffer slot for transmission buffer
+    int buf_idx = get_available_buffer();
+    if (buf_idx == -1) {
+        printf("Sender %d: S&W - No available buffer slots\n", state->myId);
+        vPortFree(pkt);
+        return;
+    }
+
+    // Clear packet data
+    memset(pkt, 0, sizeof(Packet));
+    pkt->from = state->myId;
+    pkt->to = (rand() % 2 == 0) ? 3 : 4;
+    
+    // Generate random packet length between L1 and L2
+    int packet_length = L1_BYTES + (rand() % (L2_BYTES - L1_BYTES + 1));
+    pkt->size = packet_length;
+    
+    pkt->retries = 0;
+    set_random_packet_data(pkt);
+
+    xSemaphoreTake(stats_mutex, portMAX_DELAY);
+    if (pkt->to == 3) {
+        pkt->seq = state->seq3++;
+    } else {
+        pkt->seq = state->seq4++;
+    }
+    total_transmissions++;
+    xSemaphoreGive(stats_mutex);
+
+    // Store in transmission buffer
+    xSemaphoreTake(buf_mutex, portMAX_DELAY);
+    buf_arr[buf_idx].from = pkt->from;
+    buf_arr[buf_idx].to = pkt->to;
+    buf_arr[buf_idx].seq = pkt->seq;
+    buf_arr[buf_idx].size = pkt->size;
+    buf_arr[buf_idx].retries = 0;
+    strncpy(buf_arr[buf_idx].data, pkt->data, PACKET_DATA_LEN);
+
+    // Create timeout timer for this packet (S&W specific)
+    buf_arr[buf_idx].timer = xTimerCreate(
+        "PacketTimeout",
+        pdMS_TO_TICKS(current_timeout_period),
+        pdFALSE,
+        (void*)(intptr_t)buf_idx,
+        PacketTimeoutCallback
+    );
+
+    if (buf_arr[buf_idx].timer) {
+        xTimerStart(buf_arr[buf_idx].timer, 0);
+    }
+    xSemaphoreGive(buf_mutex);
+
+    if (xQueueSend(qToSwitch, &pkt, 0) == pdPASS) {
+        printf("Sender %d: S&W - sent packet to=%d seq=%ld size=%d (waiting for ACK)\n",
+               state->myId, pkt->to, (long)pkt->seq, pkt->size);
+    } else {
+        printf("Sender %d: S&W - Could not send to switch queue.\n", state->myId);
+        // Clean up buffer and packet
+        txbuf_remove(state, buf_idx);
+        vPortFree(pkt);
+    }
+
+    // Don't schedule next packet - wait for ACK (S&W protocol)
+    // The next packet will be triggered when ACK is received in SenderTask
+}
+
+
 void SenderTimerCallback_GBN_Hybrid(TimerHandle_t xTimer) {
     SenderState *state = (SenderState *)pvTimerGetTimerID(xTimer);
 
