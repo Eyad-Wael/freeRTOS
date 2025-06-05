@@ -110,21 +110,53 @@ const char* message_pool[] = {
 #define MESSAGE_POOL_SIZE (sizeof(message_pool)/sizeof(message_pool[0]))
 
 int txbuf_find_seq(SenderState *state, int32_t seq) {
-    for (int i = 0; i < TX_BUFFER_SIZE; ++i)
-        if (state->txbuf[i].in_use && state->txbuf[i].pkt && state->txbuf[i].pkt->seq == seq)
+    for (int i = 0; i < BUFFER_ARR; ++i) {
+        if (buf_arr[i].in_use && buf_arr[i].pkt && buf_arr[i].pkt->seq == seq) {
             return i;
+        }
+    }
     return -1;
 }
+
 void txbuf_remove(SenderState *state, int idx) {
-    if (state->txbuf[idx].timer) { TimerInfo *info = (TimerInfo *) pvTimerGetTimerID(state->txbuf[idx].timer);
-    	xTimerStop(state->txbuf[idx].timer, 0); xTimerDelete(state->txbuf[idx].timer, 0);
-    	if (info) vPortFree(info);}
-    if (state->txbuf[idx].pkt) { vPortFree(state->txbuf[idx].pkt); }
-    state->txbuf[idx].pkt = NULL;
-    state->txbuf[idx].timer = NULL;
-    state->txbuf[idx].retries = 0;
-    state->txbuf[idx].in_use = false;
+    if (buf_arr[idx].timer) {
+        TimerInfo *info = (TimerInfo *) pvTimerGetTimerID(buf_arr[idx].timer);
+        xTimerStop(buf_arr[idx].timer, 0);
+        xTimerDelete(buf_arr[idx].timer, 0);
+        if (info) vPortFree(info);
+    }
+    
+    if (buf_arr[idx].pkt) {
+        buf_arr[idx].pkt->in_use = 0;  // Mark packet as available in pool
+        buf_arr[idx].pkt = NULL;
+    }
+    
+    buf_arr[idx].timer = NULL;
+    buf_arr[idx].in_use = 0;  // Mark buffer slot as available
 }
+
+// Function to get an available packet from the pool
+Packet* get_available_packet() {
+    for (int i = 0; i < PACKET_ARR; ++i) {
+        if (!pkt_arr[i].in_use) {
+            pkt_arr[i].in_use = 1;
+            return &pkt_arr[i];
+        }
+    }
+    return NULL;  
+}
+
+// Function to get an available buffer slot
+int get_available_buffer() {
+    for (int i = 0; i < BUFFER_ARR; ++i) {
+        if (!buf_arr[i].in_use) {
+            buf_arr[i].in_use = 1;
+            return i;
+        }
+    }
+    return -1;  
+}
+
 
 static void set_random_packet_data(Packet* pkt) {
     if (!pkt) return;
@@ -158,6 +190,7 @@ static void print_final_stats(void) {
 
     uint32_t throughput_bps = ((uint32_t)total_bytes_received * (uint32_t)configTICK_RATE_HZ) / (uint32_t)deltaTicks;
     printf("Throughput = %lu bytes/sec\n", (unsigned long)throughput_bps);
+    
     uint32_t avg_transmissions_per_packet = 0;
     if (total_received > 0) {
         avg_transmissions_per_packet = total_transmissions / total_received;
@@ -165,7 +198,6 @@ static void print_final_stats(void) {
     printf("Average number of transmissions per packet: %lu\n", (unsigned long)avg_transmissions_per_packet);
     printf("Packets dropped after exceeding max retries (%d): %lu\n",
         MAX_RETRIES, (unsigned long)total_dropped_max_retries);
-
 }
 
 static void CheckAndReportStatsAndStop(void) {
@@ -176,12 +208,13 @@ static void CheckAndReportStatsAndStop(void) {
     int32_t total = total_received + total_lost;
     xSemaphoreGive(stats_mutex);
 
-    if (total >= MAX_NO_OF_PACKETS) {
+    if (total >= NO_OF_PACKETS) {
         reported = true;
         print_final_stats();
         vTaskEndScheduler();
     }
 }
+
     // ----------------------------------------------------------------------------
     // Sender
 
