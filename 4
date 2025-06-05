@@ -236,124 +236,28 @@ static void CheckAndReportStatsAndStop(void) {
 
     // ----------------------------------------------------------------------------
     // Sender
-void SenderTimerCallback(TimerHandle_t xTimer) {
-    SenderState *state = (SenderState *)pvTimerGetTimerID(xTimer);
-    
-    // Check if we're waiting for ACK (S&W protocol)
-    xSemaphoreTake(buf_mutex, portMAX_DELAY);
-    bool hasUnackedPackets = false;
-    for (int i = 0; i < BUFFER_ARR; ++i) {
-        if (buf_arr[i].in_use) {
-            hasUnackedPackets = true;
-            break;
-        }
-    }
-    xSemaphoreGive(buf_mutex);
-    
-    // In S&W protocol, don't send new packet if waiting for ACK
-    if (hasUnackedPackets) {
-        printf("Sender %d: Waiting for ACK, not sending new packet\n", state->myId);
-        // Reschedule timer
-        int next_interval = T1_MIN_MS + (rand() % (T2_MAX_MS - T1_MIN_MS + 1));
-        xTimerChangePeriod(xTimer, pdMS_TO_TICKS(next_interval), 0);
-        return;
-    }
-    
-    // Get packet from pool
-    Packet *pkt = get_available_packet();
-    if (!pkt) {
-        printf("Sender %d: No available packets in pool\n", state->myId);
-        return;
-    }
-    
-    // Get buffer slot for transmission buffer
-    int buf_idx = get_available_buffer();
-    if (buf_idx == -1) {
-        printf("Sender %d: No available buffer slots\n", state->myId);
-        pkt->in_use = 0;
-        return;
-    }
-    
-    // Clear packet data
-    memset(pkt, 0, sizeof(Packet));
-    pkt->in_use = 1;
-    
-    pkt->from = state->myId;
-    pkt->to = (rand() % 2 == 0) ? 3 : 4;
-    
-    // Generate random packet length
-    int packet_length = L1_BYTES + (rand() % (L2_BYTES - L1_BYTES + 1));
-    pkt->size = packet_length;
-    
-    pkt->retries = 0;
-    set_random_packet_data(pkt);
-    
-    xSemaphoreTake(stats_mutex, portMAX_DELAY);
-    if (pkt->to == 3) {
-        pkt->seq = state->seq3++;
-    } else {
-        pkt->seq = state->seq4++;
-    }
-    total_transmissions++;
-    xSemaphoreGive(stats_mutex);
-    
-    // Store in transmission buffer
-    xSemaphoreTake(buf_mutex, portMAX_DELAY);
-    buf_arr[buf_idx].from = pkt->from;
-    buf_arr[buf_idx].to = pkt->to;
-    buf_arr[buf_idx].seq = pkt->seq;
-    buf_arr[buf_idx].size = pkt->size;
-    buf_arr[buf_idx].retries = 0;
-    strncpy(buf_arr[buf_idx].data, pkt->data, PACKET_DATA_LEN);
-    
-    // Create timeout timer for this packet
-    buf_arr[buf_idx].timer = xTimerCreate(
-        "PacketTimeout",
-        pdMS_TO_TICKS(TIMEOUT_PERIOD),
-        pdFALSE,
-        (void*)(intptr_t)buf_idx,
-        PacketTimeoutCallback
-    );
-    
-    if (buf_arr[buf_idx].timer) {
-        xTimerStart(buf_arr[buf_idx].timer, 0);
-    }
-    xSemaphoreGive(buf_mutex);
-    
-    if (xQueueSend(qToSwitch, &pkt, 0) == pdPASS) {
-        printf("Sender %d: sent packet to=%d seq=%ld size=%d (waiting for ACK)\n",
-               state->myId, pkt->to, (long)pkt->seq, pkt->size);
-    } else {
-        printf("Sender %d: Could not send to switch queue.\n", state->myId);
-        // Clean up buffer and packet
-        txbuf_remove(state, buf_idx);
-        pkt->in_use = 0;
-    }
-    
-    // Don't schedule next packet - wait for ACK (S&W protocol)
-}
 
 void PacketTimeoutCallback(TimerHandle_t xTimer) {
     int buf_idx = (int)(intptr_t)pvTimerGetTimerID(xTimer);
-    
+
     xSemaphoreTake(buf_mutex, portMAX_DELAY);
-    
+
     if (!buf_arr[buf_idx].in_use) {
         xSemaphoreGive(buf_mutex);
         return;
     }
-    
+
     buf_arr[buf_idx].retries++;
-    
+
     if (buf_arr[buf_idx].retries >= MAX_RETRIES) {
         printf("Sender: Packet seq=%ld exceeded max retries (%d), dropping\n",
                (long)buf_arr[buf_idx].seq, MAX_RETRIES);
-        
+
         xSemaphoreTake(stats_mutex, portMAX_DELAY);
         total_dropped_max_retries++;
         total_lost++;
         xSemaphoreGive(stats_mutex);
-        
+
         // Find sender state to trigger next packet
         SenderState *state = NULL;
         for (int i = 0; i < 2; i++) {
@@ -362,20 +266,20 @@ void PacketTimeoutCallback(TimerHandle_t xTimer) {
                 break;
             }
         }
-        
+
         txbuf_remove(state, buf_idx);
         xSemaphoreGive(buf_mutex);
-        
+
         // Trigger next packet generation
         if (state) {
             int next_interval = T1_MIN_MS + (rand() % (T2_MAX_MS - T1_MIN_MS + 1));
             // You'd need to store the sender timer handle to reschedule it
         }
-        
+
         CheckAndReportStatsAndStop();
         return;
     }
-    
+
     // Retransmit packet
     Packet *pkt = get_available_packet();
     if (pkt) {
@@ -387,14 +291,14 @@ void PacketTimeoutCallback(TimerHandle_t xTimer) {
         pkt->size = buf_arr[buf_idx].size;
         pkt->retries = buf_arr[buf_idx].retries;
         strncpy(pkt->data, buf_arr[buf_idx].data, PACKET_DATA_LEN);
-        
+
         printf("Sender: Retransmitting packet seq=%ld (attempt %d/%d)\n",
                (long)pkt->seq, pkt->retries, MAX_RETRIES);
-        
+
         xSemaphoreTake(stats_mutex, portMAX_DELAY);
         total_transmissions++;
         xSemaphoreGive(stats_mutex);
-        
+
         if (xQueueSend(qToSwitch, &pkt, 0) == pdPASS) {
             // Restart timeout timer
             xTimerReset(buf_arr[buf_idx].timer, 0);
@@ -402,16 +306,115 @@ void PacketTimeoutCallback(TimerHandle_t xTimer) {
             pkt->in_use = 0;
         }
     }
-    
+
     xSemaphoreGive(buf_mutex);
 }
+
+
+void SenderTimerCallback(TimerHandle_t xTimer) {
+    SenderState *state = (SenderState *)pvTimerGetTimerID(xTimer);
+
+    // Check if we're waiting for ACK (S&W protocol)
+    xSemaphoreTake(buf_mutex, portMAX_DELAY);
+    bool hasUnackedPackets = false;
+    for (int i = 0; i < BUFFER_ARR; ++i) {
+        if (buf_arr[i].in_use) {
+            hasUnackedPackets = true;
+            break;
+        }
+    }
+    xSemaphoreGive(buf_mutex);
+
+    // In S&W protocol, don't send new packet if waiting for ACK
+    if (hasUnackedPackets) {
+        printf("Sender %d: Waiting for ACK, not sending new packet\n", state->myId);
+        // Reschedule timer
+        int next_interval = T1_MIN_MS + (rand() % (T2_MAX_MS - T1_MIN_MS + 1));
+        xTimerChangePeriod(xTimer, pdMS_TO_TICKS(next_interval), 0);
+        return;
+    }
+
+    // Get packet from pool
+    Packet *pkt = get_available_packet();
+    if (!pkt) {
+        printf("Sender %d: No available packets in pool\n", state->myId);
+        return;
+    }
+
+    // Get buffer slot for transmission buffer
+    int buf_idx = get_available_buffer();
+    if (buf_idx == -1) {
+        printf("Sender %d: No available buffer slots\n", state->myId);
+        pkt->in_use = 0;
+        return;
+    }
+
+    // Clear packet data
+    memset(pkt, 0, sizeof(Packet));
+    pkt->in_use = 1;
+
+    pkt->from = state->myId;
+    pkt->to = (rand() % 2 == 0) ? 3 : 4;
+
+    // Generate random packet length
+    int packet_length = L1_BYTES + (rand() % (L2_BYTES - L1_BYTES + 1));
+    pkt->size = packet_length;
+
+    pkt->retries = 0;
+    set_random_packet_data(pkt);
+
+    xSemaphoreTake(stats_mutex, portMAX_DELAY);
+    if (pkt->to == 3) {
+        pkt->seq = state->seq3++;
+    } else {
+        pkt->seq = state->seq4++;
+    }
+    total_transmissions++;
+    xSemaphoreGive(stats_mutex);
+
+    // Store in transmission buffer
+    xSemaphoreTake(buf_mutex, portMAX_DELAY);
+    buf_arr[buf_idx].from = pkt->from;
+    buf_arr[buf_idx].to = pkt->to;
+    buf_arr[buf_idx].seq = pkt->seq;
+    buf_arr[buf_idx].size = pkt->size;
+    buf_arr[buf_idx].retries = 0;
+    strncpy(buf_arr[buf_idx].data, pkt->data, PACKET_DATA_LEN);
+
+    // Create timeout timer for this packet
+    buf_arr[buf_idx].timer = xTimerCreate(
+        "PacketTimeout",
+        pdMS_TO_TICKS(TIMEOUT_PERIOD),
+        pdFALSE,
+        (void*)(intptr_t)buf_idx,
+        PacketTimeoutCallback
+    );
+
+    if (buf_arr[buf_idx].timer) {
+        xTimerStart(buf_arr[buf_idx].timer, 0);
+    }
+    xSemaphoreGive(buf_mutex);
+
+    if (xQueueSend(qToSwitch, &pkt, 0) == pdPASS) {
+        printf("Sender %d: sent packet to=%d seq=%ld size=%d (waiting for ACK)\n",
+               state->myId, pkt->to, (long)pkt->seq, pkt->size);
+    } else {
+        printf("Sender %d: Could not send to switch queue.\n", state->myId);
+        // Clean up buffer and packet
+        txbuf_remove(state, buf_idx);
+        pkt->in_use = 0;
+    }
+
+    // Don't schedule next packet - wait for ACK (S&W protocol)
+}
+
 
  void SenderTask(void *parameters) {
     SenderState *state = (SenderState *)parameters;
     ACK *ack = NULL;
-    
+
     printf("Sender %d started with S&W protocol\n", state->myId);
-    
+
     // Create initial timer for packet generation
     int initial_interval = T1_MIN_MS + (rand() % (T2_MAX_MS - T1_MIN_MS + 1));
     TimerHandle_t timer = xTimerCreate(
@@ -421,35 +424,35 @@ void PacketTimeoutCallback(TimerHandle_t xTimer) {
         (void *)state,
         SenderTimerCallback
     );
-    
+
     if (timer != NULL) {
         xTimerStart(timer, 0);
     }
-    
+
     // Process ACKs
     QueueHandle_t myAckQueue = (state->myId == 1) ? qToSender1 : qToSender2;
-    
+
     while (1) {
         if (xQueueReceive(myAckQueue, &ack, pdMS_TO_TICKS(50)) == pdPASS) {
             printf("Sender %d: Received ACK for seq=%ld\n", state->myId, (long)ack->seq);
-            
+
             // Find and remove packet from transmission buffer
             xSemaphoreTake(buf_mutex, portMAX_DELAY);
             int buf_idx = txbuf_find_seq(state, ack->seq);
             if (buf_idx != -1) {
                 txbuf_remove(state, buf_idx);
-                printf("Sender %d: Removed packet seq=%ld from buffer\n", 
+                printf("Sender %d: Removed packet seq=%ld from buffer\n",
                        state->myId, (long)ack->seq);
-                
+
                 // Trigger next packet generation (S&W protocol)
                 int next_interval = T1_MIN_MS + (rand() % (T2_MAX_MS - T1_MIN_MS + 1));
                 xTimerChangePeriod(timer, pdMS_TO_TICKS(next_interval), 0);
             }
             xSemaphoreGive(buf_mutex);
-            
+
             ack->in_use = 0;
         }
-        
+
         vTaskDelay(pdMS_TO_TICKS(10));
     }
 }
@@ -466,8 +469,8 @@ void PacketTimeoutCallback(TimerHandle_t xTimer) {
         // Calculate transmission delay: (L*8)/C
         uint32_t transmission_delay_bits = pkt->size * 8; // Convert bytes to bits
         uint32_t transmission_delay_ms = (transmission_delay_bits * 1000) / C_LINK_CAPACITY;
-        
-        printf("Switch: Processing packet seq=%ld, size=%d bytes, transmission_delay=%lu ms\n", 
+
+        printf("Switch: Processing packet seq=%ld, size=%d bytes, transmission_delay=%lu ms\n",
                (long)pkt->seq, pkt->size, (unsigned long)transmission_delay_ms);
 
         // Simulate packet loss
