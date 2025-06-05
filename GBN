@@ -1,10 +1,5 @@
 
 
-
-
-
-
-
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdbool.h>
@@ -30,7 +25,7 @@
 #define L2_BYTES            1500
 #define K                   40 //ack size
 #define PACKET_GEN_TIME 100 // initially
-#define TIMEOUT      200
+#define TIMEOUT      225
 #define RETRIES         4
 #define C_CAPACITY     100000
 #define PROP_DELAY_MS       5
@@ -39,14 +34,14 @@
 #define P_ACK_PERCENT       1
 #define QUEUE_SIZE          40
 #define DATA_LEN     20
-#define NO_OF_PACKETS       100
+#define NO_OF_PACKETS       2000
 #define SEND_BUFFER_SIZE 		20
 #define PACKET_ARR 400
 #define ACK_ARR 200
 #define BUFFER_ARR 200
-#define  SEND_AND_WAIT
-//#define GO_BACK_N
-#define N    1
+#define  SEND_AND_WAIT  //for GO_BACK_N   comment this and un comment GO_BACK_N
+//#define GO_BACK_N     //for SEND_AND_WAIT comment this and un comment SEND_AND_WAIT
+#define N   4
 #ifdef SEND_AND_WAIT
     #define CURRENT_PROTOCOL PROTOCOL_SEND_AND_WAIT
 #else
@@ -108,26 +103,29 @@ typedef struct {
 
 // ----------------------------------------------------------------------------
 //  Variables
+
 static Packet pkt_arr[PACKET_ARR];
 static ACK ack_arr[ACK_ARR];
 static BUFFER buf_arr[BUFFER_ARR];
 static Packet *switchBuffer[QUEUE_SIZE];
-static int switchPktCount = 0;
-static bool rx3_seenSeq[NO_OF_PACKETS * 4];
-static bool rx4_seenSeq[NO_OF_PACKETS * 4];
 static uint32_t         total_transmissions       = 0;
 static uint32_t         total_dropped_max_retries = 0;
+static int32_t          total_received     = 0;
+static int32_t          total_lost         = 0;
+static uint32_t         total_bytes_received = 0;
+static int switchPktCount = 0;
+static int result_count = 0;
+static TickType_t       startTick          = 0;
+static SenderState      senderStates[2];
+static SimulationResult results[16];
+
+static bool rx3_seenSeq[NO_OF_PACKETS * 4];
+static bool rx4_seenSeq[NO_OF_PACKETS * 4];
+
 static QueueHandle_t    qToSwitch, qToRx3, qToRx4, qToSwitch_ForACKs, qToSender1, qToSender2;
 static SemaphoreHandle_t stats_mutex;
 static SemaphoreHandle_t buf_mutex;
 static SemaphoreHandle_t switch_mutex;
-static int32_t          total_received     = 0;
-static int32_t          total_lost         = 0;
-static uint32_t         total_bytes_received = 0;
-static TickType_t       startTick          = 0;
-static SenderState      senderStates[2];
-static SimulationResult results[16];
-static int result_count = 0;
 
 
 const char* message_pool[] = {
@@ -206,180 +204,6 @@ static void set_random_packet_data(Packet* pkt) {
     strncpy(pkt->data, message_pool[idx], DATA_LEN - 1);
     pkt->data[DATA_LEN - 1] = '\0';
 }
-/*
-void run_simulation_with_params(int p_drop_percent, int timeout_ms) {
-    printf("\n=== Running simulation with P_drop=%d%%, Timeout=%dms ===\n",
-           p_drop_percent, timeout_ms);
-
-    // Update global parameters
-    current_p_drop_percent = p_drop_percent;
-    current_p_ack_percent = 1;
-    current_timeout_period = timeout_ms;
-
-    // Reset all statistics
-    xSemaphoreTake(stats_mutex, portMAX_DELAY);
-    total_received = 0;
-    total_lost = 0;
-    total_transmissions = 0;
-    total_dropped_max_retries = 0;
-    total_bytes_received = 0;
-    xSemaphoreGive(stats_mutex);
-
-    // Reset sender states
-    senderStates[0].seq3 = 0;
-    senderStates[0].seq4 = 0;
-    senderStates[1].seq3 = 0;
-    senderStates[1].seq4 = 0;
-
-    // Clear sequence tracking arrays (FIXED)
-    memset(rx3_seenSeq, 0, sizeof(rx3_seenSeq));
-    memset(rx4_seenSeq, 0, sizeof(rx4_seenSeq));
-
-    // Reset buffer arrays
-    for (int i = 0; i < BUFFER_ARR; i++) {
-        if (buf_arr[i].in_use && buf_arr[i].timer) {
-            xTimerStop(buf_arr[i].timer, 0);
-            xTimerDelete(buf_arr[i].timer, 0);
-        }
-        buf_arr[i].in_use = 0;
-        buf_arr[i].timer = NULL;
-    }
-
-    // Reset packet and ACK pools
-    for (int i = 0; i < PACKET_ARR; i++) {
-        pkt_arr[i].in_use = 0;
-    }
-    for (int i = 0; i < ACK_ARR; i++) {
-        ack_arr[i].in_use = 0;
-    }
-
-    // Clear all queues
-    Packet *temp_pkt;
-    ACK *temp_ack;
-    while (xQueueReceive(qToSwitch, &temp_pkt, 0) == pdPASS) {
-        vPortFree(temp_pkt);
-    }
-    while (xQueueReceive(qToSwitch_ForACKs, &temp_ack, 0) == pdPASS) {
-        vPortFree(temp_ack);
-    }
-    while (xQueueReceive(qToRx3, &temp_pkt, 0) == pdPASS) {
-        vPortFree(temp_pkt);
-    }
-    while (xQueueReceive(qToRx4, &temp_pkt, 0) == pdPASS) {
-        vPortFree(temp_pkt);
-    }
-    while (xQueueReceive(qToSender1, &temp_ack, 0) == pdPASS) {
-        vPortFree(temp_ack);
-    }
-    while (xQueueReceive(qToSender2, &temp_ack, 0) == pdPASS) {
-        vPortFree(temp_ack);
-    }
-
-    // Start timing
-    startTick = xTaskGetTickCount();
-
-    printf("Simulation started, waiting for %d packets to be received...\n", TARGET_RECEIVED_PACKETS);
-
-    // The simulation will run until TARGET_RECEIVED_PACKETS is reached
-    // This is handled by CheckAndReportStatsAndStop function
-    // We need to wait here until simulation completes
-
-    // Wait for simulation to complete (when scheduler stops)
-    while (total_received < TARGET_RECEIVED_PACKETS) {
-        vTaskDelay(pdMS_TO_TICKS(100));
-    }
-
-    // Calculate and store results
-    TickType_t endTick = xTaskGetTickCount();
-    TickType_t deltaTicks = endTick - startTick;
-    uint32_t throughput_bps = 0;
-
-    if (deltaTicks > 0) {
-        throughput_bps = ((uint32_t)total_bytes_received * (uint32_t)configTICK_RATE_HZ) / (uint32_t)deltaTicks;
-    }
-
-    int avg_transmissions_x100 = 0;
-    if (total_received > 0) {
-        avg_transmissions_x100 = (total_transmissions * 100) / total_received;
-    }
-
-    // Store results
-    if (result_count < 16) {
-        results[result_count].p_drop_percent = p_drop_percent;
-        results[result_count].timeout_ms = timeout_ms;
-        results[result_count].throughput_bps = throughput_bps;
-        results[result_count].avg_transmissions_x100 = avg_transmissions_x100;
-        results[result_count].dropped_max_retries = total_dropped_max_retries;
-        result_count++;
-    }
-
-    printf("Results: Throughput=%lu bytes/sec, Avg_transmissions=%d.%02d, Dropped_max_retries=%lu\n",
-           (unsigned long)throughput_bps,
-           avg_transmissions_x100 / 100,
-           avg_transmissions_x100 % 100,
-           (unsigned long)total_dropped_max_retries);
-}
-
-void analyze_performance() {
-    int p_drop_values[] = {1, 2, 4, 8};
-    int timeout_values[] = {150, 175, 200, 225};
-
-    printf("\n=== Starting Performance Analysis ===\n");
-    printf("Testing %d P_drop values with %d timeout values\n", 4, 4);
-
-    result_count = 0;
-
-    for (int t = 0; t < 4; t++) {  // Fixed: 4 instead of 5
-        printf("\n--- Testing Timeout = %d ms ---\n", timeout_values[t]);
-        for (int p = 0; p < 4; p++) {  // Fixed: 4 instead of 5
-            run_simulation_with_params(p_drop_values[p], timeout_values[t]);
-        }
-    }
-    print_analysis_results();
-}
-*/
-
-void print_analysis_results() {
-    printf("\n=== Performance Analysis Results ===\n");
-    printf("P_drop%% | Timeout(ms) | Throughput(bytes/s) | Avg_TX | Dropped\n");
-    printf("--------|-------------|--------------------|---------|---------\n");
-
-    for (int i = 0; i < result_count; i++) {
-        printf("%6d | %10d | %18lu | %3d.%02d | %7lu\n",
-               results[i].p_drop_percent,
-               results[i].timeout,
-               (unsigned long)results[i].throughput_bps,
-               results[i].avg_transmissions_x100 / 100,
-               results[i].avg_transmissions_x100 % 100,
-               (unsigned long)results[i].dropped_max_retries);
-    }
-
-    uint32_t max_throughput = 0;
-    uint32_t min_throughput = 0xFFFFFFFF;
-    int best_idx = 0, worst_idx = 0;
-
-    for (int i = 0; i < result_count; i++) {
-        if (results[i].throughput_bps > max_throughput) {
-            max_throughput = results[i].throughput_bps;
-            best_idx = i;
-        }
-        if (results[i].throughput_bps < min_throughput) {
-            min_throughput = results[i].throughput_bps;
-            worst_idx = i;
-        }
-    }
-
-    printf("\nBest Performance: P_drop=%d%%, Timeout=%dms, Throughput=%lu bytes/s\n",
-           results[best_idx].p_drop_percent,
-           results[best_idx].timeout,
-           (unsigned long)results[best_idx].throughput_bps);
-
-    printf("Worst Performance: P_drop=%d%%, Timeout=%dms, Throughput=%lu bytes/s\n",
-           results[worst_idx].p_drop_percent,
-           results[worst_idx].timeout,
-           (unsigned long)results[worst_idx].throughput_bps);
-}
-
 
 static void print_final_stats(void) {
     int32_t total = total_received + total_lost;
@@ -416,6 +240,121 @@ static void print_final_stats(void) {
         RETRIES, (unsigned long)total_dropped_max_retries);
 }
 
+//Export function using ai 
+
+void export_results_to_csv(const char* filename) {
+    FILE *file = fopen(filename, "w");
+    if (!file) {
+        printf("Error: Could not create CSV file %s\n", filename);
+        return;
+    }
+    
+    // Calculate final statistics
+    TickType_t endTick = xTaskGetTickCount();
+    TickType_t deltaTicks = endTick - startTick;
+    uint32_t throughput_bps = 0;
+    
+    if (deltaTicks > 0) {
+        throughput_bps = ((uint32_t)total_bytes_received * (uint32_t)configTICK_RATE_HZ) / (uint32_t)deltaTicks;
+    }
+    
+    int avg_transmissions_x100 = 0;
+    if (total_received > 0) {
+        avg_transmissions_x100 = (total_transmissions * 100) / total_received;
+    }
+    
+    int32_t total_packets = total_received + total_lost;
+    int32_t loss_percent_x100 = 0;
+    if (total_packets > 0) {
+        loss_percent_x100 = (total_lost * 10000) / total_packets;
+    }
+    
+    // Write comprehensive CSV header
+    fprintf(file, "Category,Parameter,Value,Unit,Description\n");
+    
+    // Protocol Configuration Section
+    fprintf(file, "Protocol,Type,%s,,Communication protocol used\n", 
+            (CURRENT_PROTOCOL == PROTOCOL_SEND_AND_WAIT) ? "Send_and_Wait" : "Go_Back_N");
+    fprintf(file, "Protocol,Window_size,%d,packets,Transmission window size\n", N);
+    
+    // Network Parameters Section
+    fprintf(file, "Network,P_drop,%d,%%,Packet drop probability\n", P_DROP_PERCENT);
+    fprintf(file, "Network,P_ack,%d,%%,ACK drop probability\n", P_ACK_PERCENT);
+    fprintf(file, "Network,Timeout,%d,ms,Timeout period\n", TIMEOUT);
+    fprintf(file, "Network,Propagation_delay,%d,ms,Link propagation delay\n", PROP_DELAY_MS);
+    fprintf(file, "Network,Link_capacity,%d,bps,Link capacity in bits per second\n", C_CAPACITY);
+    fprintf(file, "Network,Packet_gen_interval,%d-%d,ms,Packet generation interval range\n", T1, T2);
+    fprintf(file, "Network,Queue_size,%d,packets,Switch buffer size\n", QUEUE_SIZE);
+    
+    // Packet Parameters Section
+    fprintf(file, "Packet,Size_range,%d-%d,bytes,Packet size range\n", L1_BYTES, L2_BYTES);
+    fprintf(file, "Packet,Header_size,%d,bytes,Packet header size\n", HEADER_SIZE);
+    fprintf(file, "Packet,Data_length,%d,bytes,Packet data length\n", DATA_LEN);
+    fprintf(file, "Packet,ACK_size,%d,bytes,ACK packet size\n", K);
+    fprintf(file, "Packet,Max_retries,%d,attempts,Maximum retransmission attempts\n", RETRIES);
+    fprintf(file, "Packet,Target_packets,%d,packets,Target packets to receive\n", NO_OF_PACKETS);
+    
+    // Simulation Results Section
+    fprintf(file, "Results,Total_received,%ld,packets,Successfully received packets\n", (long)total_received);
+    fprintf(file, "Results,Total_lost,%ld,packets,Lost packets\n", (long)total_lost);
+    fprintf(file, "Results,Total_transmissions,%lu,packets,Total packet transmissions\n", (unsigned long)total_transmissions);
+    fprintf(file, "Results,Dropped_max_retries,%lu,packets,Packets dropped after max retries\n", (unsigned long)total_dropped_max_retries);
+    fprintf(file, "Results,Total_bytes_received,%lu,bytes,Total bytes successfully received\n", (unsigned long)total_bytes_received);
+    
+    // Timing Results Section
+    fprintf(file, "Timing,Simulation_time,%lu,ticks,Total simulation time in ticks\n", (unsigned long)deltaTicks);
+    fprintf(file, "Timing,Simulation_time_ms,%lu,ms,Total simulation time in milliseconds\n", 
+            (unsigned long)(deltaTicks * 1000 / configTICK_RATE_HZ));
+    fprintf(file, "Timing,Start_tick,%lu,ticks,Simulation start time\n", (unsigned long)startTick);
+    fprintf(file, "Timing,End_tick,%lu,ticks,Simulation end time\n", (unsigned long)endTick);
+    
+    // Performance Metrics Section
+    fprintf(file, "Performance,Throughput,%lu,bytes_per_sec,Network throughput\n", (unsigned long)throughput_bps);
+    fprintf(file, "Performance,Loss_percentage,%d.%02d,%%,Packet loss percentage\n", 
+            loss_percent_x100 / 100, loss_percent_x100 % 100);
+    fprintf(file, "Performance,Avg_transmissions_per_packet,%d.%02d,transmissions,Average transmissions per received packet\n", 
+            avg_transmissions_x100 / 100, avg_transmissions_x100 % 100);
+    
+    // Additional Calculated Metrics
+    if (total_received > 0) {
+        uint32_t avg_packet_size = total_bytes_received / total_received;
+        fprintf(file, "Performance,Avg_packet_size,%lu,bytes,Average packet size\n", (unsigned long)avg_packet_size);
+        
+        uint32_t throughput_kbps = throughput_bps / 1000;
+        fprintf(file, "Performance,Throughput_kbps,%lu,kbytes_per_sec,Network throughput in KB/s\n", (unsigned long)throughput_kbps);
+    }
+    
+    if (total_transmissions > 0) {
+        int efficiency_x100 = (total_received * 100) / total_transmissions;
+        fprintf(file, "Performance,Transmission_efficiency,%d.%02d,%%,Successful transmissions percentage\n",
+                efficiency_x100 / 100, efficiency_x100 % 100);
+    }
+    
+    if (deltaTicks > 0) {
+        uint32_t packets_per_second = (total_received * configTICK_RATE_HZ) / deltaTicks;
+        fprintf(file, "Performance,Packets_per_second,%lu,packets_per_sec,Packet reception rate\n", (unsigned long)packets_per_second);
+    }
+    
+    // System Resource Usage Section
+    fprintf(file, "Resources,Buffer_array_size,%d,slots,Transmission buffer array size\n", BUFFER_ARR);
+    fprintf(file, "Resources,Packet_array_size,%d,slots,Packet pool array size\n", PACKET_ARR);
+    fprintf(file, "Resources,ACK_array_size,%d,slots,ACK pool array size\n", ACK_ARR);
+    
+    // Protocol Specific Metrics
+    if (CURRENT_PROTOCOL == PROTOCOL_GO_BACK_N) {
+        if (total_transmissions > 0 && total_received > 0) {
+            int window_utilization_x100 = (total_received * N * 100) / total_transmissions;
+            fprintf(file, "Protocol,Window_utilization,%d.%02d,%%,Window utilization efficiency\n",
+                    window_utilization_x100 / 100, window_utilization_x100 % 100);
+        }
+    }
+    
+    fclose(file);
+    printf("Complete results exported to %s\n", filename);
+}
+
+
+
 static void CheckAndReportStatsAndStop(void) {
     static bool reported = false;
     if (reported) return;
@@ -427,6 +366,12 @@ static void CheckAndReportStatsAndStop(void) {
     if (received >= NO_OF_PACKETS) {
         reported = true;
         print_final_stats();
+        
+        char filename[150];
+        sprintf(filename, "simulation_results_%s_pdrop%d_timeout%d_window%d.csv", 
+                (CURRENT_PROTOCOL == PROTOCOL_SEND_AND_WAIT) ? "SW" : "GBN",
+                P_DROP_PERCENT, TIMEOUT, N);
+                export_complete_results_to_csv(filename);
         vTaskEndScheduler();
     }
 }
@@ -435,6 +380,7 @@ static void CheckAndReportStatsAndStop(void) {
     // Sender Send and WAit
 
 void PacketTimeoutCallback(TimerHandle_t xTimer) {
+	// printf("DEBUG: PacketTimeoutCallback\n");
     int buf_idx = (int)(intptr_t)pvTimerGetTimerID(xTimer);
 
     xSemaphoreTake(buf_mutex, portMAX_DELAY);
@@ -449,8 +395,9 @@ void PacketTimeoutCallback(TimerHandle_t xTimer) {
     if (buf_arr[buf_idx].retries >= RETRIES) {
         printf("Sender: Packet seq=%ld exceeded max retries (%d), dropping\n",
                (long)buf_arr[buf_idx].seq, RETRIES);
-
+        // printf("DEBUG: PacketTimeoutCallback before sema\n");
         xSemaphoreTake(stats_mutex, portMAX_DELAY);
+        // printf("DEBUG: PacketTimeoutCallback after sema\n");
         total_dropped_max_retries++;
         total_lost++;
         xSemaphoreGive(stats_mutex);
@@ -470,7 +417,7 @@ void PacketTimeoutCallback(TimerHandle_t xTimer) {
         return;
     }
 
-
+    // printf("DEBUG: PacketTimeoutCallback before malloc\n");
     Packet *pkt = (Packet*)pvPortMalloc(sizeof(Packet));
     if (pkt) {
         memset(pkt, 0, sizeof(Packet));
@@ -480,6 +427,7 @@ void PacketTimeoutCallback(TimerHandle_t xTimer) {
         pkt->size = buf_arr[buf_idx].size;
         pkt->retries = buf_arr[buf_idx].retries;
         strncpy(pkt->data, buf_arr[buf_idx].data, DATA_LEN);
+        // printf("DEBUG: PacketTimeoutCallback after malloc\n");
 
         printf("Sender: Retransmitting packet seq=%ld (attempt %d/%d)\n",
                (long)pkt->seq, pkt->retries, RETRIES);
@@ -499,12 +447,14 @@ void PacketTimeoutCallback(TimerHandle_t xTimer) {
 }
 
 void SenderTimerCallback_SW(TimerHandle_t xTimer) {
+	// printf("DEBUG: SenderTimerCallback_SW\n");
     SenderState *state = (SenderState *)pvTimerGetTimerID(xTimer);
 
     printf("Sender %d: S&W Timer callback\n", state->myId);
 
-
+    // printf("DEBUG: SenderTimerCallback_SW before sema\n");
     xSemaphoreTake(buf_mutex, portMAX_DELAY);
+    // printf("DEBUG: SenderTimerCallback_SW after sema\n");
     bool hasUnackedPackets = false;
     for (int i = 0; i < BUFFER_ARR; ++i) {
         if (buf_arr[i].used && buf_arr[i].from == state->myId) {
@@ -591,89 +541,11 @@ void SenderTimerCallback_SW(TimerHandle_t xTimer) {
 // ----------------------------------------------------------------------------
     // Sender GO BACK
 
-void PacketTimeoutCallback_GBN_Hybrid(TimerHandle_t xTimer) {
-    int buf_idx = (int)(intptr_t)pvTimerGetTimerID(xTimer);
-
-    xSemaphoreTake(buf_mutex, portMAX_DELAY);
-
-    if (!buf_arr[buf_idx].used) {
-        xSemaphoreGive(buf_mutex);
-        return;
-    }
-
-    int32_t expired_seq = buf_arr[buf_idx].seq;
-    int32_t sender_id = buf_arr[buf_idx].from;
-
-    // Find sender state
-    SenderState *state = NULL;
-    for (int i = 0; i < 2; i++) {
-        if (senderStates[i].myId == sender_id) {
-            state = &senderStates[i];
-            break;
-        }
-    }
-
-    if (!state) {
-        xSemaphoreGive(buf_mutex);
-        return;
-    }
-
-    printf("Sender %d: Hybrid GBN - Timer expired for packet %ld, retransmitting window\n",
-           sender_id, (long)expired_seq);
-
-    // Retransmit packet j and all packets up to j+N-1 (window retransmission)
-    int32_t start_seq = expired_seq;
-    int32_t end_seq = expired_seq + WINDOW_SIZE - 1;
-
-    // But limit to actually sent packets
-    if (end_seq >= state->nextseqnum) {
-        end_seq = state->nextseqnum - 1;
-    }
-
-    printf("Sender %d: Hybrid GBN - Retransmitting packets %ld to %ld\n",
-           sender_id, (long)start_seq, (long)end_seq);
-
-    for (int32_t seq = start_seq; seq <= end_seq; seq++) {
-        Packet *pkt = (Packet*)pvPortMalloc(sizeof(Packet));
-        if (pkt) {
-            memset(pkt, 0, sizeof(Packet));
-            pkt->from = sender_id;
-            pkt->to = (seq % 2 == 0) ? 3 : 4;
-            pkt->seq = seq;
-            pkt->size = L1_BYTES + (rand() % (L2_BYTES - L1_BYTES + 1));
-            set_random_packet_data(pkt);
-
-            if (xQueueSend(qToSwitch, &pkt, 0) == pdPASS) {
-                printf("Sender %d: Hybrid GBN - Retransmitted packet seq=%ld\n",
-                       sender_id, (long)seq);
-
-                xSemaphoreTake(stats_mutex, portMAX_DELAY);
-                total_transmissions++;
-                xSemaphoreGive(stats_mutex);
-            } else {
-                vPortFree(pkt);
-            }
-        }
-    }
-
-
-    // Restart timer for this packet
-    xTimerReset(buf_arr[buf_idx].timer, 0);
-
-    xSemaphoreGive(buf_mutex);
-}
-
-
-
-
-
-
 void SenderTimerCallback_GBN(TimerHandle_t xTimer) {
+	//printf("DEBUG: SenderTimerCallback_GBN\n");
     SenderState *state = (SenderState *)pvTimerGetTimerID(xTimer);
 
     printf("Sender %d: GBN Timer callback\n", state->myId);
-
-    // Go-Back-N: Send multiple packets up to window size
     int packets_sent = 0;
     while (state->nextseqnum < state->send_base + state->window_size && packets_sent < 3) {
         Packet *pkt = (Packet*)pvPortMalloc(sizeof(Packet));
@@ -698,12 +570,13 @@ void SenderTimerCallback_GBN(TimerHandle_t xTimer) {
 
             state->nextseqnum++;
             packets_sent++;
-
+            //printf("DEBUG: SenderTimerCallback_GBN beforesema\n");
             xSemaphoreTake(stats_mutex, portMAX_DELAY);
+            //printf("DEBUG: SenderTimerCallback_GBN after sema\n");
             total_transmissions++;
             xSemaphoreGive(stats_mutex);
 
-            // Start window timer if this is first packet in window
+
             if (state->send_base == state->nextseqnum - 1) {
                 xTimerStart(state->window_timer, 0);
             }
@@ -714,18 +587,19 @@ void SenderTimerCallback_GBN(TimerHandle_t xTimer) {
         }
     }
 
-    // Schedule next transmission
-    int next_interval = T1_MIN_MS + (rand() % (T2_MAX_MS - T1_MIN_MS + 1));
+
+    int next_interval = T1 + (rand() % (T2 - T1 + 1));
     xTimerChangePeriod(xTimer, pdMS_TO_TICKS(next_interval), 0);
 }
 
 void WindowTimeoutCallback(TimerHandle_t xTimer) {
+	//printf("DEBUG: WindowTimeoutCallback\n");
     SenderState *state = (SenderState *)pvTimerGetTimerID(xTimer);
 
     printf("Sender %d: GBN - Window timeout, retransmitting packets %ld to %ld\n",
            state->myId, (long)state->send_base, (long)(state->nextseqnum - 1));
 
-    // Retransmit all packets in window
+
     for (int32_t seq = state->send_base; seq < state->nextseqnum; seq++) {
         Packet *pkt = (Packet*)pvPortMalloc(sizeof(Packet));
         if (pkt) {
@@ -739,7 +613,9 @@ void WindowTimeoutCallback(TimerHandle_t xTimer) {
 
             if (xQueueSend(qToSwitch, &pkt, 0) == pdPASS) {
                 printf("Sender %d: GBN - Retransmitted packet seq=%ld\n", state->myId, (long)seq);
+                //printf("DEBUG: WindowTimeoutCallback before sema\n");
                 xSemaphoreTake(stats_mutex, portMAX_DELAY);
+                //printf("DEBUG: WindowTimeoutCallback after sema\n");
                 total_transmissions++;
                 xSemaphoreGive(stats_mutex);
             } else {
@@ -748,14 +624,15 @@ void WindowTimeoutCallback(TimerHandle_t xTimer) {
         }
     }
 
-    // Restart window timer
+
     xTimerReset(xTimer, 0);
 }
 
 // ----------------------------------------------------------------------------
-    // Sender 
+    // Sender
 
 void SenderTimerCallback(TimerHandle_t xTimer) {
+	//printf("DEBUG: SenderTimerCallback\n");
     SenderState *state = (SenderState *)pvTimerGetTimerID(xTimer);
 
     if (state->protocol == PROTOCOL_SEND_AND_WAIT) {
@@ -768,6 +645,7 @@ void SenderTimerCallback(TimerHandle_t xTimer) {
 
 
 void SenderTask(void *parameters) {
+	//printf("DEBUG: SenderTask\n");
     SenderState *state = (SenderState *)parameters;
     ACK *ack = NULL;
 
@@ -798,8 +676,9 @@ void SenderTask(void *parameters) {
             if (state->protocol == PROTOCOL_SEND_AND_WAIT) {
 
                 printf("Sender %d: S&W - Received ACK for seq=%ld\n", state->myId, (long)ack->seq);
-
+                //printf("DEBUG: SenderTask before sema\n");
                 xSemaphoreTake(buf_mutex, portMAX_DELAY);
+                //printf("DEBUG: SenderTask after sema\n");
                 int buf_idx = txbuf_find_seq(state, ack->seq);
                 if (buf_idx != -1) {
                     txbuf_remove(state, buf_idx);
@@ -844,6 +723,7 @@ void SenderTask(void *parameters) {
     // ----------------------------------------------------------------------------
     // Switch
 void SwitchTimerCallback(TimerHandle_t xTimer) {
+	//printf("DEBUG: SwitchTimerCallback\n");
     xSemaphoreTake(switch_mutex, portMAX_DELAY);
 
     for (int i = 0; i < switchPktCount; ++i) {
@@ -861,7 +741,9 @@ void SwitchTimerCallback(TimerHandle_t xTimer) {
             printf("Switch: Dropping packet from=%d to=%d seq=%ld (random loss)\n",
                    pkt->from, pkt->to, (long)pkt->seq);
             vPortFree(pkt);
+        	//printf("DEBUG: SwitchTimerCallback before sema\n");
             xSemaphoreTake(stats_mutex, portMAX_DELAY);
+        	//printf("DEBUG: SwitchTimerCallback after sema\n");
             total_lost++;
             xSemaphoreGive(stats_mutex);
             CheckAndReportStatsAndStop();
@@ -877,7 +759,9 @@ void SwitchTimerCallback(TimerHandle_t xTimer) {
                 printf("Switch: Queue to receiver 3 full, dropping packet seq=%ld\n",
                        (long)pkt->seq);
                 vPortFree(pkt);
-                xSemaphoreTake(stats_mutex, portMAX_DELAY);
+                //printf("DEBUG: SwitchTimerCallback before sema3\n");
+                            xSemaphoreTake(stats_mutex, portMAX_DELAY);
+                        	//printf("DEBUG: SwitchTimerCallback after sema3\n");
                 total_lost++;
                 xSemaphoreGive(stats_mutex);
                 CheckAndReportStatsAndStop();
@@ -890,7 +774,9 @@ void SwitchTimerCallback(TimerHandle_t xTimer) {
                 printf("Switch: Queue to receiver 4 full, dropping packet seq=%ld\n",
                        (long)pkt->seq);
                 vPortFree(pkt);
-                xSemaphoreTake(stats_mutex, portMAX_DELAY);
+                //printf("DEBUG: SwitchTimerCallback before sema4\n");
+                            xSemaphoreTake(stats_mutex, portMAX_DELAY);
+                        	//printf("DEBUG: SwitchTimerCallback after sema4\n");
                 total_lost++;
                 xSemaphoreGive(stats_mutex);
                 CheckAndReportStatsAndStop();
@@ -908,6 +794,8 @@ void SwitchTimerCallback(TimerHandle_t xTimer) {
 
 
 void SwitchTask(void *params) {
+	//printf("DEBUG: SwitchTAsk\n");
+
     Packet *pkt = NULL;
     ACK *ack = NULL;
 
@@ -938,8 +826,9 @@ void SwitchTask(void *params) {
     while (1) {
 
         if (xQueueReceive(qToSwitch, &pkt, pdMS_TO_TICKS(25)) == pdPASS) {
+        	//printf("DEBUG: SwitchTAsk before sema\n");
             xSemaphoreTake(switch_mutex, portMAX_DELAY);
-
+            //printf("DEBUG: SwitchTAsk aftert sema\n");
             if (switchPktCount < QUEUE_SIZE) {
                 switchBuffer[switchPktCount++] = pkt;
                 printf("Switch: Buffered data packet from=%d to=%d seq=%ld size=%d (buffer: %d/%d)\n",
@@ -997,6 +886,7 @@ void SwitchTask(void *params) {
     // Receiver Send and wait
 
  void ReceiverTask_SW(void *parameters) {
+	 //printf("DEBUG: ReceiverTask_SW\n");
     int32_t myId = (int32_t)parameters;
     Packet *pkt = NULL;
     BaseType_t status;
@@ -1027,7 +917,7 @@ void SwitchTask(void *params) {
             } else if (pkt->seq < (NO_OF_PACKETS * 2)) {
                 seenSeq[pkt->seq] = true;
             }
-
+            //printf("DEBUG: ReceiverTask_SW before malloc\n");
             ACK *ack = (ACK*)pvPortMalloc(sizeof(ACK));
             if (ack) {
                 memset(ack, 0, sizeof(ACK));
@@ -1036,7 +926,7 @@ void SwitchTask(void *params) {
                 ack->seq = pkt->seq;
                 ack->size = K;
                 ack->isAck = true;
-
+                //printf("DEBUG: ReceiverTask_SW after malloc\n");
                 if (xQueueSend(qToSwitch_ForACKs, &ack, 0) == pdPASS) {
                     printf("Receiver %d: S&W - Sent ACK to sender %d for seq=%ld\n",
                            myId, pkt->from, (long)pkt->seq);
@@ -1047,7 +937,9 @@ void SwitchTask(void *params) {
 
 
             if (!isDuplicate) {
+            	//printf("DEBUG: ReceiverTask_SW befor sema\n");
                 xSemaphoreTake(stats_mutex, portMAX_DELAY);
+                //printf("DEBUG: ReceiverTask_SW after sema\n");
                 total_received++;
                 total_bytes_received += pkt->size;
                 xSemaphoreGive(stats_mutex);
@@ -1061,6 +953,7 @@ void SwitchTask(void *params) {
  // ----------------------------------------------------------------------------
     // Receiver GO Back
 void ReceiverTask_GBN(void *parameters) {
+	//printf("DEBUG: ReceiverTask_GBM\n");
     int32_t myId = (int32_t)parameters;
     int32_t expected_seq_sender1 = 0;
     int32_t expected_seq_sender2 = 0;
@@ -1081,26 +974,27 @@ void ReceiverTask_GBN(void *parameters) {
         }
 
         if (status == pdPASS) {
-            // Get expected sequence for this sender
+
             int32_t *expected_seq = (pkt->from == 1) ? &expected_seq_sender1 : &expected_seq_sender2;
 
             printf("Receiver %d: GBN - Received packet from=%d seq=%ld (expected=%ld)\n",
                    myId, pkt->from, (long)pkt->seq, (long)*expected_seq);
 
             if (pkt->seq == *expected_seq) {
-                // In-order packet - accept it
+
                 printf("Receiver %d: GBN - Accepted packet seq=%ld from sender %d\n",
                        myId, (long)pkt->seq, pkt->from);
                 (*expected_seq)++;
 
-                // Update statistics
-                xSemaphoreTake(stats_mutex, portMAX_DELAY);
+                //printf("DEBUG: ReceiverTask_GBN befor sema\n");
+                                xSemaphoreTake(stats_mutex, portMAX_DELAY);
+                                //printf("DEBUG: ReceiverTask_GBM after sema\n");
                 total_received++;
                 total_bytes_received += pkt->size;
                 xSemaphoreGive(stats_mutex);
                 CheckAndReportStatsAndStop();
 
-                // Send cumulative ACK
+
                 ACK *ack = (ACK*)pvPortMalloc(sizeof(ACK));
                 if (ack) {
                     memset(ack, 0, sizeof(ACK));
@@ -1149,7 +1043,7 @@ void ReceiverTask_GBN(void *parameters) {
     }
 }
  // ----------------------------------------------------------------------------
-    // Receiver 
+    // Receiver
 
 void ReceiverTask(void *parameters) {
     if (CURRENT_PROTOCOL == PROTOCOL_SEND_AND_WAIT) {
