@@ -44,7 +44,9 @@
 #define ACK_ARR 200
 #define BUFFER_ARR 200
 #define TARGET_RECEIVED_PACKETS 20
-#define CURRENT_PROTOCOL PROTOCOL_SEND_AND_WAIT
+//#define CURRENT_PROTOCOL PROTOCOL_SEND_AND_WAIT
+#define CURRENT_PROTOCOL PROTOCOL_GO_BACK_N
+
 #define WINDOW_SIZE 5
 // ----------------------------------------------------------------------------
 // Type Definitions
@@ -179,7 +181,7 @@ Packet* get_available_packet() {
     return NULL;
 }
 
-// Function to get an available buffer slot
+
 int get_available_buffer() {
     for (int i = 0; i < BUFFER_ARR; ++i) {
         if (!buf_arr[i].in_use) {
@@ -216,7 +218,7 @@ void run_simulation_with_params(int p_drop_percent, int timeout_ms) {
 
     // Update global parameters
     current_p_drop_percent = p_drop_percent;
-    current_p_ack_percent = 1;  // Keep ACK drop at 1%
+    current_p_ack_percent = 1;
     current_timeout_period = timeout_ms;
 
     // Reset all statistics
@@ -234,9 +236,9 @@ void run_simulation_with_params(int p_drop_percent, int timeout_ms) {
     senderStates[1].seq3 = 0;
     senderStates[1].seq4 = 0;
 
-    // Clear sequence tracking arrays
-    memset(senderStates[0].seenSeq, 0, sizeof(senderStates[0].seenSeq));
-    memset(senderStates[1].seenSeq, 0, sizeof(senderStates[1].seenSeq));
+    // Clear sequence tracking arrays (FIXED)
+    memset(rx3_seenSeq, 0, sizeof(rx3_seenSeq));
+    memset(rx4_seenSeq, 0, sizeof(rx4_seenSeq));
 
     // Reset buffer arrays
     for (int i = 0; i < BUFFER_ARR; i++) {
@@ -322,27 +324,25 @@ void run_simulation_with_params(int p_drop_percent, int timeout_ms) {
            avg_transmissions_x100 % 100,
            (unsigned long)total_dropped_max_retries);
 }
-
+*/
 void analyze_performance() {
-    int p_drop_values[] = {1, 2, 4, 8};  // 1%, 2%, 5%, 10%, 15%
-    int timeout_values[] = {150, 175 , 200, 225};
-
+    int p_drop_values[] = {1, 2, 4, 8};
+    int timeout_values[] = {150, 175, 200, 225};
+    
     printf("\n=== Starting Performance Analysis ===\n");
-    printf("Testing %d P_drop values with %d timeout values\n", 5, 5);
-
+    printf("Testing %d P_drop values with %d timeout values\n", 4, 4);
+    
     result_count = 0;
-
-    // Test throughput vs P_drop for different timeouts
-    for (int t = 0; t < 5; t++) {
+    
+    for (int t = 0; t < 4; t++) {  // Fixed: 4 instead of 5
         printf("\n--- Testing Timeout = %d ms ---\n", timeout_values[t]);
-        for (int p = 0; p < 5; p++) {
+        for (int p = 0; p < 4; p++) {  // Fixed: 4 instead of 5
             run_simulation_with_params(p_drop_values[p], timeout_values[t]);
         }
     }
-
-    // Print summary results
+    
     print_analysis_results();
-} */
+}
 
 void print_analysis_results() {
     printf("\n=== Performance Analysis Results ===\n");
@@ -826,9 +826,10 @@ void SenderTimerCallback(TimerHandle_t xTimer) {
     if (state->protocol == PROTOCOL_SEND_AND_WAIT) {
         SenderTimerCallback_SW(xTimer);
     } else if (state->protocol == PROTOCOL_GO_BACK_N) {
-        SenderTimerCallback_GBN(xTimer);
+        SenderTimerCallback_GBN_Hybrid(xTimer);  
     }
 }
+
 
 void SenderTask(void *parameters) {
     SenderState *state = (SenderState *)parameters;
@@ -1299,7 +1300,7 @@ memset(rx4_seenSeq, 0, sizeof(rx4_seenSeq));
     xTaskCreate(SwitchTask, "Switch", 1024, NULL, 1, NULL);
 
     startTick = xTaskGetTickCount();
-    
+   
     vTaskStartScheduler();
 
     return 0;
