@@ -3,6 +3,8 @@
 
 
 
+
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdbool.h>
@@ -47,7 +49,7 @@
 //#define CURRENT_PROTOCOL PROTOCOL_SEND_AND_WAIT
 #define CURRENT_PROTOCOL PROTOCOL_GO_BACK_N
 
-#define WINDOW_SIZE 5
+#define WINDOW_SIZE 4
 // ----------------------------------------------------------------------------
 // Type Definitions
 typedef enum {
@@ -87,13 +89,13 @@ typedef struct {
 typedef struct {
     int32_t myId;
     int32_t seq3, seq4;  // For S&W protocol
-    
+
     // Go-Back-N specific fields
     int32_t send_base;
     int32_t nextseqnum;
     int32_t window_size;
     TimerHandle_t window_timer;
-    
+
     // Protocol type
     ProtocolType protocol;
 } SenderState;
@@ -211,7 +213,7 @@ static void set_random_packet_data(Packet* pkt) {
     strncpy(pkt->data, message_pool[idx], PACKET_DATA_LEN - 1);
     pkt->data[PACKET_DATA_LEN - 1] = '\0';
 }
-/*
+
 void run_simulation_with_params(int p_drop_percent, int timeout_ms) {
     printf("\n=== Running simulation with P_drop=%d%%, Timeout=%dms ===\n",
            p_drop_percent, timeout_ms);
@@ -324,23 +326,23 @@ void run_simulation_with_params(int p_drop_percent, int timeout_ms) {
            avg_transmissions_x100 % 100,
            (unsigned long)total_dropped_max_retries);
 }
-*/
+
 void analyze_performance() {
     int p_drop_values[] = {1, 2, 4, 8};
     int timeout_values[] = {150, 175, 200, 225};
-    
+
     printf("\n=== Starting Performance Analysis ===\n");
     printf("Testing %d P_drop values with %d timeout values\n", 4, 4);
-    
+
     result_count = 0;
-    
+
     for (int t = 0; t < 4; t++) {  // Fixed: 4 instead of 5
         printf("\n--- Testing Timeout = %d ms ---\n", timeout_values[t]);
         for (int p = 0; p < 4; p++) {  // Fixed: 4 instead of 5
             run_simulation_with_params(p_drop_values[p], timeout_values[t]);
         }
     }
-    
+
     print_analysis_results();
 }
 
@@ -505,17 +507,17 @@ void PacketTimeoutCallback(TimerHandle_t xTimer) {
 }
 void PacketTimeoutCallback_GBN_Hybrid(TimerHandle_t xTimer) {
     int buf_idx = (int)(intptr_t)pvTimerGetTimerID(xTimer);
-    
+
     xSemaphoreTake(buf_mutex, portMAX_DELAY);
-    
+
     if (!buf_arr[buf_idx].in_use) {
         xSemaphoreGive(buf_mutex);
         return;
     }
-    
+
     int32_t expired_seq = buf_arr[buf_idx].seq;
     int32_t sender_id = buf_arr[buf_idx].from;
-    
+
     // Find sender state
     SenderState *state = NULL;
     for (int i = 0; i < 2; i++) {
@@ -524,27 +526,27 @@ void PacketTimeoutCallback_GBN_Hybrid(TimerHandle_t xTimer) {
             break;
         }
     }
-    
+
     if (!state) {
         xSemaphoreGive(buf_mutex);
         return;
     }
-    
-    printf("Sender %d: Hybrid GBN - Timer expired for packet %ld, retransmitting window\n", 
+
+    printf("Sender %d: Hybrid GBN - Timer expired for packet %ld, retransmitting window\n",
            sender_id, (long)expired_seq);
-    
+
     // Retransmit packet j and all packets up to j+N-1 (window retransmission)
     int32_t start_seq = expired_seq;
     int32_t end_seq = expired_seq + WINDOW_SIZE - 1;
-    
+
     // But limit to actually sent packets
     if (end_seq >= state->nextseqnum) {
         end_seq = state->nextseqnum - 1;
     }
-    
+
     printf("Sender %d: Hybrid GBN - Retransmitting packets %ld to %ld\n",
            sender_id, (long)start_seq, (long)end_seq);
-    
+
     for (int32_t seq = start_seq; seq <= end_seq; seq++) {
         Packet *pkt = (Packet*)pvPortMalloc(sizeof(Packet));
         if (pkt) {
@@ -554,11 +556,11 @@ void PacketTimeoutCallback_GBN_Hybrid(TimerHandle_t xTimer) {
             pkt->seq = seq;
             pkt->size = L1_BYTES + (rand() % (L2_BYTES - L1_BYTES + 1));
             set_random_packet_data(pkt);
-            
+
             if (xQueueSend(qToSwitch, &pkt, 0) == pdPASS) {
-                printf("Sender %d: Hybrid GBN - Retransmitted packet seq=%ld\n", 
+                printf("Sender %d: Hybrid GBN - Retransmitted packet seq=%ld\n",
                        sender_id, (long)seq);
-                
+
                 xSemaphoreTake(stats_mutex, portMAX_DELAY);
                 total_transmissions++;
                 xSemaphoreGive(stats_mutex);
@@ -567,86 +569,38 @@ void PacketTimeoutCallback_GBN_Hybrid(TimerHandle_t xTimer) {
             }
         }
     }
-   
+
 
     // Restart timer for this packet
     xTimerReset(buf_arr[buf_idx].timer, 0);
-    
+
     xSemaphoreGive(buf_mutex);
 }
 
- void SenderTimerCallback_GBN_Hybrid(TimerHandle_t xTimer) {
+void SenderTimerCallback_GBN_Hybrid(TimerHandle_t xTimer) {
     SenderState *state = (SenderState *)pvTimerGetTimerID(xTimer);
 
-    printf("Sender %d: Hybrid GBN Timer callback\n", state->myId);
-
-    // Send multiple packets up to window size, each with its own timer
+    // Send packets to each destination with separate sequence counters
     int packets_sent = 0;
-    while (state->nextseqnum < state->send_base + state->window_size && packets_sent < 3) {
+    while (packets_sent < 2) {  // Send to both destinations
         Packet *pkt = (Packet*)pvPortMalloc(sizeof(Packet));
         if (!pkt) break;
 
-        // Get buffer slot for this packet's timer
-        int buf_idx = get_available_buffer();
-        if (buf_idx == -1) {
-            vPortFree(pkt);
-            break;
-        }
-
         memset(pkt, 0, sizeof(Packet));
         pkt->from = state->myId;
-        pkt->to = (rand() % 2 == 0) ? 3 : 4;
-        pkt->seq = state->nextseqnum;
-        int packet_length = L1_BYTES + (rand() % (L2_BYTES - L1_BYTES + 1));
-        pkt->size = packet_length;
-        set_random_packet_data(pkt);
-
-        // Store in buffer with individual timer (key difference)
-        xSemaphoreTake(buf_mutex, portMAX_DELAY);
-        buf_arr[buf_idx].from = pkt->from;
-        buf_arr[buf_idx].to = pkt->to;
-        buf_arr[buf_idx].seq = pkt->seq;
-        buf_arr[buf_idx].size = pkt->size;
-        buf_arr[buf_idx].retries = 0;
-        strncpy(buf_arr[buf_idx].data, pkt->data, PACKET_DATA_LEN);
-
-        // Create individual timer for each packet (hybrid approach)
-        buf_arr[buf_idx].timer = xTimerCreate(
-            "HybridGBNTimer",
-            pdMS_TO_TICKS(current_timeout_period),
-            pdFALSE,
-            (void*)(intptr_t)buf_idx,
-            PacketTimeoutCallback_GBN_Hybrid  // Use hybrid callback
-        );
-
-        if (buf_arr[buf_idx].timer) {
-            xTimerStart(buf_arr[buf_idx].timer, 0);
-        }
-        xSemaphoreGive(buf_mutex);
-
-        if (xQueueSend(qToSwitch, &pkt, 0) == pdPASS) {
-            printf("Sender %d: Hybrid GBN - sent packet seq=%ld (window: %ld-%ld)\n",
-                   state->myId, (long)pkt->seq, 
-                   (long)state->send_base, 
-                   (long)(state->send_base + state->window_size - 1));
-            
-            state->nextseqnum++;
-            packets_sent++;
-            
-            xSemaphoreTake(stats_mutex, portMAX_DELAY);
-            total_transmissions++;
-            xSemaphoreGive(stats_mutex);
+        
+        // Alternate between destinations
+        if (packets_sent == 0) {
+            pkt->to = 3;
+            pkt->seq = state->seq3++;  // Use per-destination sequence
         } else {
-            // Clean up on send failure
-            txbuf_remove(state, buf_idx);
-            vPortFree(pkt);
-            break;
+            pkt->to = 4;
+            pkt->seq = state->seq4++;  // Use per-destination sequence
         }
+        
+        // ... rest of packet creation and sending logic
+        packets_sent++;
     }
-
-    // Schedule next transmission
-    int next_interval = T1_MIN_MS + (rand() % (T2_MAX_MS - T1_MIN_MS + 1));
-    xTimerChangePeriod(xTimer, pdMS_TO_TICKS(next_interval), 0);
 }
 
 void SenderTimerCallback_SW(TimerHandle_t xTimer) {
@@ -761,13 +715,13 @@ void SenderTimerCallback_GBN(TimerHandle_t xTimer) {
 
         if (xQueueSend(qToSwitch, &pkt, 0) == pdPASS) {
             printf("Sender %d: GBN - sent packet seq=%ld (window: %ld-%ld)\n",
-                   state->myId, (long)pkt->seq, 
-                   (long)state->send_base, 
+                   state->myId, (long)pkt->seq,
+                   (long)state->send_base,
                    (long)(state->send_base + state->window_size - 1));
-            
+
             state->nextseqnum++;
             packets_sent++;
-            
+
             xSemaphoreTake(stats_mutex, portMAX_DELAY);
             total_transmissions++;
             xSemaphoreGive(stats_mutex);
@@ -789,10 +743,10 @@ void SenderTimerCallback_GBN(TimerHandle_t xTimer) {
 }
 void WindowTimeoutCallback(TimerHandle_t xTimer) {
     SenderState *state = (SenderState *)pvTimerGetTimerID(xTimer);
-    
+
     printf("Sender %d: GBN - Window timeout, retransmitting packets %ld to %ld\n",
            state->myId, (long)state->send_base, (long)(state->nextseqnum - 1));
-    
+
     // Retransmit all packets in window
     for (int32_t seq = state->send_base; seq < state->nextseqnum; seq++) {
         Packet *pkt = (Packet*)pvPortMalloc(sizeof(Packet));
@@ -804,7 +758,7 @@ void WindowTimeoutCallback(TimerHandle_t xTimer) {
             int packet_length = L1_BYTES + (rand() % (L2_BYTES - L1_BYTES + 1));
             pkt->size = packet_length;
             set_random_packet_data(pkt);
-            
+
             if (xQueueSend(qToSwitch, &pkt, 0) == pdPASS) {
                 printf("Sender %d: GBN - Retransmitted packet seq=%ld\n", state->myId, (long)seq);
                 xSemaphoreTake(stats_mutex, portMAX_DELAY);
@@ -815,18 +769,18 @@ void WindowTimeoutCallback(TimerHandle_t xTimer) {
             }
         }
     }
-    
+
     // Restart window timer
     xTimerReset(xTimer, 0);
 }
 
 void SenderTimerCallback(TimerHandle_t xTimer) {
     SenderState *state = (SenderState *)pvTimerGetTimerID(xTimer);
-    
+
     if (state->protocol == PROTOCOL_SEND_AND_WAIT) {
         SenderTimerCallback_SW(xTimer);
     } else if (state->protocol == PROTOCOL_GO_BACK_N) {
-        SenderTimerCallback_GBN_Hybrid(xTimer);  
+        SenderTimerCallback_GBN_Hybrid(xTimer);
     }
 }
 
@@ -834,13 +788,13 @@ void SenderTimerCallback(TimerHandle_t xTimer) {
 void SenderTask(void *parameters) {
     SenderState *state = (SenderState *)parameters;
     ACK *ack = NULL;
-    
+
     if (state->protocol == PROTOCOL_SEND_AND_WAIT) {
         printf("Sender %d started with S&W protocol\n", state->myId);
     } else {
         printf("Sender %d started with Go-Back-N protocol\n", state->myId);
     }
-    
+
     int initial_interval = T1_MIN_MS + (rand() % (T2_MAX_MS - T1_MIN_MS + 1));
     TimerHandle_t timer = xTimerCreate(
         "SenderTimer",
@@ -849,20 +803,20 @@ void SenderTask(void *parameters) {
         (void *)state,
         SenderTimerCallback
     );
-    
+
     if (timer != NULL) {
         xTimerStart(timer, 0);
     }
-    
+
     QueueHandle_t myAckQueue = (state->myId == 1) ? qToSender1 : qToSender2;
-    
+
     while (1) {
         if (xQueueReceive(myAckQueue, &ack, pdMS_TO_TICKS(50)) == pdPASS) {
 
             if (state->protocol == PROTOCOL_SEND_AND_WAIT) {
                 // S&W ACK processing
                 printf("Sender %d: S&W - Received ACK for seq=%ld\n", state->myId, (long)ack->seq);
-                
+
                 xSemaphoreTake(buf_mutex, portMAX_DELAY);
                 int buf_idx = txbuf_find_seq(state, ack->seq);
                 if (buf_idx != -1) {
@@ -878,7 +832,7 @@ void SenderTask(void *parameters) {
             } else if (state->protocol == PROTOCOL_GO_BACK_N) {
                 // Go-Back-N ACK processing
                 printf("Sender %d: GBN - Received ACK for seq=%ld\n", state->myId, (long)ack->seq);
-                
+
                 if (ack->seq >= state->send_base) {
                     // Remove timers for all acknowledged packets
                     xSemaphoreTake(buf_mutex, portMAX_DELAY);
@@ -886,14 +840,14 @@ void SenderTask(void *parameters) {
                         int buf_idx = txbuf_find_seq(state, seq);
                         if (buf_idx != -1) {
                             txbuf_remove(state, buf_idx);
-                            printf("Sender %d: GBN - Removed timer for packet seq=%ld\n", 
+                            printf("Sender %d: GBN - Removed timer for packet seq=%ld\n",
                                    state->myId, (long)seq);
                         }
                     }
                     xSemaphoreGive(buf_mutex);
-                    
+
                     state->send_base = ack->seq + 1;
-                    printf("Sender %d: GBN - Advanced window to %ld\n", 
+                    printf("Sender %d: GBN - Advanced window to %ld\n",
                            state->myId, (long)state->send_base);
                 }
             }
@@ -1126,17 +1080,17 @@ void SwitchTask(void *params) {
         }
     }
 }
-
 void ReceiverTask_GBN(void *parameters) {
     int32_t myId = (int32_t)parameters;
-    int32_t expected_seq = 0;  // Next expected sequence number
-    
+    int32_t expected_seq_sender1 = 0;  // Expected seq from sender 1
+    int32_t expected_seq_sender2 = 0;  // Expected seq from sender 2
+
     printf("Receiver %d started with Go-Back-N protocol\n", myId);
 
     while (1) {
         Packet *pkt = NULL;
         BaseType_t status;
-        
+
         if (myId == 3) {
             status = xQueueReceive(qToRx3, &pkt, pdMS_TO_TICKS(1000));
         } else if (myId == 4) {
@@ -1145,71 +1099,76 @@ void ReceiverTask_GBN(void *parameters) {
             vTaskDelay(pdMS_TO_TICKS(1000));
             continue;
         }
-        
-        if (status == pdPASS) {
-            printf("Receiver %d: GBN - Received packet from=%d seq=%ld (expected=%ld)\n",
-                   myId, pkt->from, (long)pkt->seq, (long)expected_seq);
 
-            if (pkt->seq == expected_seq) {
+        if (status == pdPASS) {
+            // Get expected sequence for this sender
+            int32_t *expected_seq = (pkt->from == 1) ? &expected_seq_sender1 : &expected_seq_sender2;
+            
+            printf("Receiver %d: GBN - Received packet from=%d seq=%ld (expected=%ld)\n",
+                   myId, pkt->from, (long)pkt->seq, (long)*expected_seq);
+
+            if (pkt->seq == *expected_seq) {
                 // In-order packet - accept it
-                printf("Receiver %d: GBN - Accepted packet seq=%ld\n", myId, (long)pkt->seq);
-                expected_seq++;
-                
+                printf("Receiver %d: GBN - Accepted packet seq=%ld from sender %d\n", 
+                       myId, (long)pkt->seq, pkt->from);
+                (*expected_seq)++;
+
                 // Update statistics
                 xSemaphoreTake(stats_mutex, portMAX_DELAY);
                 total_received++;
                 total_bytes_received += pkt->size;
                 xSemaphoreGive(stats_mutex);
                 CheckAndReportStatsAndStop();
-                
+
                 // Send cumulative ACK
                 ACK *ack = (ACK*)pvPortMalloc(sizeof(ACK));
                 if (ack) {
                     memset(ack, 0, sizeof(ACK));
                     ack->from = myId;
                     ack->to = pkt->from;
-                    ack->seq = pkt->seq;  // Cumulative ACK
+                    ack->seq = pkt->seq;
                     ack->size = K;
                     ack->isAck = true;
-                    
+
                     if (xQueueSend(qToSwitch_ForACKs, &ack, 0) == pdPASS) {
-                        printf("Receiver %d: GBN - Sent cumulative ACK for seq=%ld\n",
-                               myId, (long)pkt->seq);
+                        printf("Receiver %d: GBN - Sent cumulative ACK for seq=%ld to sender %d\n",
+                               myId, (long)pkt->seq, pkt->from);
                     } else {
                         vPortFree(ack);
                     }
                 }
-                
+
             } else {
                 // Out-of-order packet - drop it
-                printf("Receiver %d: GBN - Dropped out-of-order packet seq=%ld\n",
-                       myId, (long)pkt->seq);
-                
-                // Send ACK for last in-order packet
-                if (expected_seq > 0) {
+                printf("Receiver %d: GBN - Dropped out-of-order packet seq=%ld from sender %d (expected=%ld)\n",
+                       myId, (long)pkt->seq, pkt->from, (long)*expected_seq);
+
+                // Send ACK for last in-order packet from this sender
+                if (*expected_seq > 0) {
                     ACK *ack = (ACK*)pvPortMalloc(sizeof(ACK));
                     if (ack) {
                         memset(ack, 0, sizeof(ACK));
                         ack->from = myId;
                         ack->to = pkt->from;
-                        ack->seq = expected_seq - 1;  // Last correctly received
+                        ack->seq = *expected_seq - 1;
                         ack->size = K;
                         ack->isAck = true;
-                        
+
                         if (xQueueSend(qToSwitch_ForACKs, &ack, 0) == pdPASS) {
-                            printf("Receiver %d: GBN - Sent duplicate ACK for seq=%ld\n",
-                                   myId, (long)(expected_seq - 1));
+                            printf("Receiver %d: GBN - Sent duplicate ACK for seq=%ld to sender %d\n",
+                                   myId, (long)(*expected_seq - 1), pkt->from);
                         } else {
                             vPortFree(ack);
                         }
                     }
                 }
             }
-            
+
             vPortFree(pkt);
         }
     }
 }
+
 
 void ReceiverTask(void *parameters) {
     if (CURRENT_PROTOCOL == PROTOCOL_SEND_AND_WAIT) {
@@ -1242,9 +1201,9 @@ void ReceiverTask(void *parameters) {
     }
 
    int main(int argc, char* argv[]) {
-    printf("\n=== Starting Simulation with %s Protocol ===\n", 
+    printf("\n=== Starting Simulation with %s Protocol ===\n",
            (CURRENT_PROTOCOL == PROTOCOL_SEND_AND_WAIT) ? "Send and Wait" : "Go-Back-N");
-    
+
     setupQueues();
 
     stats_mutex = xSemaphoreCreateMutex();
@@ -1285,7 +1244,7 @@ memset(rx4_seenSeq, 0, sizeof(rx4_seenSeq));
         senderStates[1].nextseqnum = 0;
         senderStates[1].window_size = WINDOW_SIZE;
         senderStates[1].window_timer = xTimerCreate(
-            "WindowTimer2", 
+            "WindowTimer2",
             pdMS_TO_TICKS(current_timeout_period),
             pdFALSE,
             (void*)&senderStates[1],
@@ -1300,7 +1259,7 @@ memset(rx4_seenSeq, 0, sizeof(rx4_seenSeq));
     xTaskCreate(SwitchTask, "Switch", 1024, NULL, 1, NULL);
 
     startTick = xTaskGetTickCount();
-   
+
     vTaskStartScheduler();
 
     return 0;
