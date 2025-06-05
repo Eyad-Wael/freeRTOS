@@ -313,7 +313,7 @@ void SenderTimerCallback(TimerHandle_t xTimer) {
     // ----------------------------------------------------------------------------
     // Switch
 
-  void SwitchTimerCallback(TimerHandle_t xTimer) {
+ void SwitchTimerCallback(TimerHandle_t xTimer) {
     xSemaphoreTake(switch_mutex, portMAX_DELAY);
 
     for (int i = 0; i < switchPktCount; ++i) {
@@ -378,7 +378,6 @@ void SenderTimerCallback(TimerHandle_t xTimer) {
     switchPktCount = 0;
     xSemaphoreGive(switch_mutex);
 }
-
 
 void SwitchTask(void *params) {
     Packet *pkt = NULL;
@@ -450,7 +449,22 @@ void SwitchTask(void *params) {
                 } else {
                     printf("Switch: Failed to forward ACK to sender 1\n");
                     ack->in_use = 0;
-
+                }
+            } else if (ack->to == 2) {
+                if (xQueueSend(qToSender2, &ack, 0) == pdPASS) {
+                    printf("Switch: Forwarded ACK to sender 2 (seq=%ld)\n", (long)ack->seq);
+                } else {
+                    printf("Switch: Failed to forward ACK to sender 2\n");
+                    ack->in_use = 0;
+                }
+            } else {
+                printf("Switch: Invalid ACK destination %d, dropping ACK seq=%ld\n",
+                       ack->to, (long)ack->seq);
+                ack->in_use = 0;
+            }
+        }
+    }
+}
 
     // ----------------------------------------------------------------------------
     // Receiver
@@ -537,6 +551,7 @@ void SwitchTask(void *params) {
         }
     }
 }
+
 
 
 
