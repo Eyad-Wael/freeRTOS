@@ -4,9 +4,6 @@
 
 
 
-
-
-
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdbool.h>
@@ -32,16 +29,16 @@
 #define L2_BYTES            1500
 #define K                   40 //ack size
 #define PACKET_GEN_TIME 100 // initially
-#define TIMEOUT      225  // {150, 175, 200, 225} msec 
+#define TIMEOUT      225  // {150, 175, 200, 225} msec
 #define RETRIES         4
 #define C_CAPACITY     100000
 #define PROP_DELAY_MS       5
-#define P_DROP_PERCENT      1     //{1, 2, 4, 8} 
+#define P_DROP_PERCENT      2     //{1, 2, 4, 8}
 #define P_DROP_SCALE        100
 #define P_ACK_PERCENT       1
 #define QUEUE_SIZE          40
 #define DATA_LEN     20
-#define NO_OF_PACKETS       2000
+#define NO_OF_PACKETS       2000   //total of 2 receivers
 #define SEND_BUFFER_SIZE 		20
 #define PACKET_ARR 400
 #define ACK_ARR 200
@@ -241,11 +238,11 @@ static void print_final_stats(void) {
 
 void export_results_to_csv(const char* base_filename) {
     char full_filename[512];
-    
+
     // Use your specific desktop path
     sprintf(full_filename, "/home/osboxes/Desktop/%s", base_filename);
     printf("Attempting to save CSV to desktop: %s\n", full_filename);
-    
+
     FILE *file = fopen(full_filename, "w");
     if (!file) {
         printf("Error: Could not create CSV file on desktop, trying current directory\n");
@@ -256,35 +253,35 @@ void export_results_to_csv(const char* base_filename) {
         }
         strcpy(full_filename, base_filename);
     }
-    
+
     // Calculate final statistics
     TickType_t endTick = xTaskGetTickCount();
     TickType_t deltaTicks = endTick - startTick;
     uint32_t throughput_bps = 0;
-    
+
     if (deltaTicks > 0) {
         throughput_bps = ((uint32_t)total_bytes_received * (uint32_t)configTICK_RATE_HZ) / (uint32_t)deltaTicks;
     }
-    
+
     int avg_transmissions_x100 = 0;
     if (total_received > 0) {
         avg_transmissions_x100 = (total_transmissions * 100) / total_received;
     }
-    
+
     int32_t total_packets = total_received + total_lost;
     int32_t loss_percent_x100 = 0;
     if (total_packets > 0) {
         loss_percent_x100 = (total_lost * 10000) / total_packets;
     }
-    
+
     // Write comprehensive CSV header
     fprintf(file, "Category,Parameter,Value,Unit,Description\n");
-    
+
     // Protocol Configuration Section
-    fprintf(file, "Protocol,Type,%s,,Communication protocol used\n", 
+    fprintf(file, "Protocol,Type,%s,,Communication protocol used\n",
             (CURRENT_PROTOCOL == PROTOCOL_SEND_AND_WAIT) ? "Send_and_Wait" : "Go_Back_N");
     fprintf(file, "Protocol,Window_size,%d,packets,Transmission window size\n", N);
-    
+
     // Network Parameters Section
     fprintf(file, "Network,P_drop,%d,%%,Packet drop probability\n", P_DROP_PERCENT);
     fprintf(file, "Network,P_ack,%d,%%,ACK drop probability\n", P_ACK_PERCENT);
@@ -292,21 +289,21 @@ void export_results_to_csv(const char* base_filename) {
     fprintf(file, "Network,Propagation_delay,%d,ms,Link propagation delay\n", PROP_DELAY_MS);
     fprintf(file, "Network,Link_capacity,%d,bps,Link capacity in bits per second\n", C_CAPACITY);
     fprintf(file, "Network,Packet_gen_interval,%d-%d,ms,Packet generation interval range\n", T1, T2);
-    
+
     // Simulation Results Section
     fprintf(file, "Results,Total_received,%ld,packets,Successfully received packets\n", (long)total_received);
     fprintf(file, "Results,Total_lost,%ld,packets,Lost packets\n", (long)total_lost);
     fprintf(file, "Results,Total_transmissions,%lu,packets,Total packet transmissions\n", (unsigned long)total_transmissions);
     fprintf(file, "Results,Dropped_max_retries,%lu,packets,Packets dropped after max retries\n", (unsigned long)total_dropped_max_retries);
     fprintf(file, "Results,Total_bytes_received,%lu,bytes,Total bytes successfully received\n", (unsigned long)total_bytes_received);
-    
+
     // Performance Metrics Section
     fprintf(file, "Performance,Throughput,%lu,bytes_per_sec,Network throughput\n", (unsigned long)throughput_bps);
-    fprintf(file, "Performance,Loss_percentage,%d.%02d,%%,Packet loss percentage\n", 
+    fprintf(file, "Performance,Loss_percentage,%d.%02d,%%,Packet loss percentage\n",
             loss_percent_x100 / 100, loss_percent_x100 % 100);
-    fprintf(file, "Performance,Avg_transmissions_per_packet,%d.%02d,transmissions,Average transmissions per received packet\n", 
+    fprintf(file, "Performance,Avg_transmissions_per_packet,%d.%02d,transmissions,Average transmissions per received packet\n",
             avg_transmissions_x100 / 100, avg_transmissions_x100 % 100);
-    
+
     fclose(file);
     printf("Complete results exported to: %s\n", full_filename);
 }
@@ -331,7 +328,7 @@ static void CheckAndReportStatsAndStop(void) {
         sprintf(filename, "/home/osboxes/Desktop/simulation_results_%s_pdrop%d_timeout%d_window%d.csv",
                 (CURRENT_PROTOCOL == PROTOCOL_SEND_AND_WAIT) ? "SW" : "GBN",
                 P_DROP_PERCENT, TIMEOUT, N);
-        
+
         export_results_to_csv(filename);
         vTaskEndScheduler();
     }
