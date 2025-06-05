@@ -160,6 +160,18 @@ int get_available_buffer() {
 }
 
 
+ACK* get_available_ack() {
+    for (int i = 0; i < ACK_ARR; ++i) {
+        if (!ack_arr[i].in_use) {
+            ack_arr[i].in_use = 1;
+            return &ack_arr[i];
+        }
+    }
+    return NULL;
+}
+
+
+
 static void set_random_packet_data(Packet* pkt) {
     if (!pkt) return;
     int idx = rand() % MESSAGE_POOL_SIZE;
@@ -296,17 +308,24 @@ void SenderTimerCallback(TimerHandle_t xTimer) {
     // ----------------------------------------------------------------------------
     // Switch
 
-    void SwitchTimerCallback(TimerHandle_t xTimer) {
+  void SwitchTimerCallback(TimerHandle_t xTimer) {
     xSemaphoreTake(switch_mutex, portMAX_DELAY);
 
     for (int i = 0; i < switchPktCount; ++i) {
         Packet *pkt = switchBuffer[i];
 
+        // Calculate transmission delay: (L*8)/C
+        uint32_t transmission_delay_bits = pkt->size * 8; // Convert bytes to bits
+        uint32_t transmission_delay_ms = (transmission_delay_bits * 1000) / C_LINK_CAPACITY;
+        
+        printf("Switch: Processing packet seq=%ld, size=%d bytes, transmission_delay=%lu ms\n", 
+               (long)pkt->seq, pkt->size, (unsigned long)transmission_delay_ms);
+
         // Simulate packet loss
         int drop_rand = rand() % P_DROP_SCALE;
         if (drop_rand < P_DROP_PERCENT) {
-            printf("Switch: Dropping packet from=%d to=%d seq=%ld (random loss)\n",
-                   pkt->from, pkt->to, (long)pkt->seq);
+            printf("Switch: Dropping packet from=%d to=%d seq=%ld (random loss, would have %lu ms transmission delay)\n",
+                   pkt->from, pkt->to, (long)pkt->seq, (unsigned long)transmission_delay_ms);
             // Return packet to pool
             pkt->in_use = 0;
             xSemaphoreTake(stats_mutex, portMAX_DELAY);
@@ -316,11 +335,11 @@ void SenderTimerCallback(TimerHandle_t xTimer) {
             continue;
         }
 
-        // Forward packet to appropriate receiver
+        // Forward packet to appropriate receiver after transmission delay
         if (pkt->to == 3) {
             if (xQueueSendToBack(qToRx3, &pkt, 0) == pdPASS) {
-                printf("Switch: Forwarded packet to receiver 3 (seq=%ld, size=%d)\n",
-                       (long)pkt->seq, pkt->size);
+                printf("Switch: Forwarded packet to receiver 3 (seq=%ld, size=%d, tx_delay=%lu ms)\n",
+                       (long)pkt->seq, pkt->size, (unsigned long)transmission_delay_ms);
             } else {
                 printf("Switch: Queue to receiver 3 full, dropping packet seq=%ld\n",
                        (long)pkt->seq);
@@ -332,8 +351,8 @@ void SenderTimerCallback(TimerHandle_t xTimer) {
             }
         } else if (pkt->to == 4) {
             if (xQueueSendToBack(qToRx4, &pkt, 0) == pdPASS) {
-                printf("Switch: Forwarded packet to receiver 4 (seq=%ld, size=%d)\n",
-                       (long)pkt->seq, pkt->size);
+                printf("Switch: Forwarded packet to receiver 4 (seq=%ld, size=%d, tx_delay=%lu ms)\n",
+                       (long)pkt->seq, pkt->size, (unsigned long)transmission_delay_ms);
             } else {
                 printf("Switch: Queue to receiver 4 full, dropping packet seq=%ld\n",
                        (long)pkt->seq);
@@ -358,8 +377,9 @@ void SenderTimerCallback(TimerHandle_t xTimer) {
 
 void SwitchTask(void *params) {
     Packet *pkt = NULL;
+    ACK *ack = NULL;
 
-    printf("Switch started\n");
+    printf("Switch started with enhanced ACK processing\n");
 
     switch_mutex = xSemaphoreCreateMutex();
     if (switch_mutex == NULL) {
@@ -367,6 +387,7 @@ void SwitchTask(void *params) {
         return;
     }
 
+    // Timer for propagation delay (constant D = PROP_DELAY_MS)
     TimerHandle_t timer = xTimerCreate(
         "SwitchTimer",
         pdMS_TO_TICKS(PROP_DELAY_MS),
@@ -384,16 +405,17 @@ void SwitchTask(void *params) {
     }
 
     while (1) {
-        if (xQueueReceive(qToSwitch, &pkt, pdMS_TO_TICKS(50)) == pdPASS) {
+        // Process data packets
+        if (xQueueReceive(qToSwitch, &pkt, pdMS_TO_TICKS(25)) == pdPASS) {
             xSemaphoreTake(switch_mutex, portMAX_DELAY);
 
             if (switchPktCount < QUEUE_SIZE) {
                 switchBuffer[switchPktCount++] = pkt;
-                printf("Switch: Buffered packet from=%d to=%d seq=%ld size=%d (buffer: %d/%d)\n",
+                printf("Switch: Buffered data packet from=%d to=%d seq=%ld size=%d (buffer: %d/%d)\n",
                        pkt->from, pkt->to, (long)pkt->seq, pkt->size, switchPktCount, QUEUE_SIZE);
             } else {
                 // Buffer full, drop packet
-                printf("Switch: Buffer full (%d/%d), dropping packet from=%d to=%d seq=%ld\n",
+                printf("Switch: Buffer full (%d/%d), dropping data packet from=%d to=%d seq=%ld\n",
                        switchPktCount, QUEUE_SIZE, pkt->from, pkt->to, (long)pkt->seq);
                 pkt->in_use = 0;
                 xSemaphoreTake(stats_mutex, portMAX_DELAY);
@@ -404,21 +426,38 @@ void SwitchTask(void *params) {
 
             xSemaphoreGive(switch_mutex);
         }
-    }
-}
+
+        // Process ACK packets
+        if (xQueueReceive(qToSwitch_ForACKs, &ack, pdMS_TO_TICKS(25)) == pdPASS) {
+            // ACK dropping with probability P_ACK
+            int drop_rand = rand() % P_DROP_SCALE;
+            if (drop_rand < P_ACK) {
+                printf("Switch: Dropping ACK from=%d to=%d seq=%ld (random ACK loss)\n",
+                       ack->from, ack->to, (long)ack->seq);
+                ack->in_use = 0;
+                continue;
+            }
+
+            // Forward ACK to appropriate sender
+            if (ack->to == 1) {
+                if (xQueueSend(qToSender1, &ack, 0) == pdPASS) {
+                    printf("Switch: Forwarded ACK to sender 1 (seq=%ld)\n", (long)ack->seq);
+                } else {
+                    printf("Switch: Failed to forward ACK to sender 1\n");
+                    ack->in_use = 0;
 
 
     // ----------------------------------------------------------------------------
     // Receiver
 
-  void ReceiverTask(void *parameters) {
+ void ReceiverTask(void *parameters) {
     int32_t myId = (int32_t)parameters;
     Packet *pkt = NULL;
     BaseType_t status;
     int32_t expectedSeq = 0;
     const TickType_t ticksToWait = pdMS_TO_TICKS(TIMEOUT_PERIOD);
 
-    printf("Receiver %d started\n", myId);
+    printf("Receiver %d started with ACK generation\n", myId);
 
     while (1) {
         // Receive packet from appropriate queue
@@ -447,6 +486,28 @@ void SwitchTask(void *params) {
             printf("Receiver %d: Packet received - from=%d seq=%ld size=%d data=\"%s\"\n",
                    myId, pkt->from, (long)pkt->seq, pkt->size, pkt->data);
 
+            // Generate ACK
+            ACK *ack = get_available_ack();
+            if (ack) {
+                memset(ack, 0, sizeof(ACK));
+                ack->in_use = 1;
+                ack->from = myId;
+                ack->to = pkt->from;
+                ack->seq = pkt->seq;
+                ack->size = K; // ACK size
+                ack->isAck = true;
+
+                if (xQueueSend(qToSwitch_ForACKs, &ack, 0) == pdPASS) {
+                    printf("Receiver %d: Sent ACK to sender %d for seq=%ld\n",
+                           myId, pkt->from, (long)pkt->seq);
+                } else {
+                    printf("Receiver %d: Failed to send ACK\n", myId);
+                    ack->in_use = 0;
+                }
+            } else {
+                printf("Receiver %d: No available ACK slots\n", myId);
+            }
+
             expectedSeq = pkt->seq + 1;
 
             // Update statistics
@@ -473,6 +534,7 @@ void SwitchTask(void *params) {
 }
 
 
+
     // ----------------------------------------------------------------------------
     // Setup
 
@@ -489,6 +551,7 @@ void SwitchTask(void *params) {
     	    configASSERT(qToRx4);
     	    configASSERT(qToSender1);
     	    configASSERT(qToSender2);
+	  printf("All queues created successfully\n");
     }
 
     int main(int argc, char* argv[]) {
