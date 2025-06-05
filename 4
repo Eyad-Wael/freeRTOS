@@ -4,6 +4,7 @@
 
 
 
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdbool.h>
@@ -44,7 +45,7 @@
 #define PACKET_ARR 400
 #define ACK_ARR 200
 #define BUFFER_ARR 200
-#define TARGET_RECEIVED_PACKETS 100
+#define TARGET_RECEIVED_PACKETS 20
 
 // ----------------------------------------------------------------------------
 // Type Definitions
@@ -117,7 +118,7 @@ static SenderState      senderStates[2];
 static int current_p_drop_percent = 1;
 static int current_p_ack_percent = 1;
 static int current_timeout_period = 200;
-static SimulationResult results[16];  
+static SimulationResult results[16];
 static int result_count = 0;
 
 
@@ -197,16 +198,16 @@ static void set_random_packet_data(Packet* pkt) {
     strncpy(pkt->data, message_pool[idx], PACKET_DATA_LEN - 1);
     pkt->data[PACKET_DATA_LEN - 1] = '\0';
 }
-
+/*
 void run_simulation_with_params(int p_drop_percent, int timeout_ms) {
-    printf("\n=== Running simulation with P_drop=%d%%, Timeout=%dms ===\n", 
+    printf("\n=== Running simulation with P_drop=%d%%, Timeout=%dms ===\n",
            p_drop_percent, timeout_ms);
-    
+
     // Update global parameters
     current_p_drop_percent = p_drop_percent;
     current_p_ack_percent = 1;  // Keep ACK drop at 1%
     current_timeout_period = timeout_ms;
-    
+
     // Reset all statistics
     xSemaphoreTake(stats_mutex, portMAX_DELAY);
     total_received = 0;
@@ -215,17 +216,17 @@ void run_simulation_with_params(int p_drop_percent, int timeout_ms) {
     total_dropped_max_retries = 0;
     total_bytes_received = 0;
     xSemaphoreGive(stats_mutex);
-    
+
     // Reset sender states
     senderStates[0].seq3 = 0;
     senderStates[0].seq4 = 0;
     senderStates[1].seq3 = 0;
     senderStates[1].seq4 = 0;
-    
+
     // Clear sequence tracking arrays
     memset(senderStates[0].seenSeq, 0, sizeof(senderStates[0].seenSeq));
     memset(senderStates[1].seenSeq, 0, sizeof(senderStates[1].seenSeq));
-    
+
     // Reset buffer arrays
     for (int i = 0; i < BUFFER_ARR; i++) {
         if (buf_arr[i].in_use && buf_arr[i].timer) {
@@ -235,7 +236,7 @@ void run_simulation_with_params(int p_drop_percent, int timeout_ms) {
         buf_arr[i].in_use = 0;
         buf_arr[i].timer = NULL;
     }
-    
+
     // Reset packet and ACK pools
     for (int i = 0; i < PACKET_ARR; i++) {
         pkt_arr[i].in_use = 0;
@@ -243,7 +244,7 @@ void run_simulation_with_params(int p_drop_percent, int timeout_ms) {
     for (int i = 0; i < ACK_ARR; i++) {
         ack_arr[i].in_use = 0;
     }
-    
+
     // Clear all queues
     Packet *temp_pkt;
     ACK *temp_ack;
@@ -265,37 +266,37 @@ void run_simulation_with_params(int p_drop_percent, int timeout_ms) {
     while (xQueueReceive(qToSender2, &temp_ack, 0) == pdPASS) {
         vPortFree(temp_ack);
     }
-    
+
     // Start timing
     startTick = xTaskGetTickCount();
-    
+
     printf("Simulation started, waiting for %d packets to be received...\n", TARGET_RECEIVED_PACKETS);
-    
+
     // The simulation will run until TARGET_RECEIVED_PACKETS is reached
     // This is handled by CheckAndReportStatsAndStop function
     // We need to wait here until simulation completes
-    
+
     // Wait for simulation to complete (when scheduler stops)
     while (total_received < TARGET_RECEIVED_PACKETS) {
         vTaskDelay(pdMS_TO_TICKS(100));
     }
-    
+
     // Calculate and store results
     TickType_t endTick = xTaskGetTickCount();
     TickType_t deltaTicks = endTick - startTick;
     uint32_t throughput_bps = 0;
-    
+
     if (deltaTicks > 0) {
         throughput_bps = ((uint32_t)total_bytes_received * (uint32_t)configTICK_RATE_HZ) / (uint32_t)deltaTicks;
     }
-    
+
     int avg_transmissions_x100 = 0;
     if (total_received > 0) {
         avg_transmissions_x100 = (total_transmissions * 100) / total_received;
     }
-    
+
     // Store results
-    if (result_count < 25) {
+    if (result_count < 16) {
         results[result_count].p_drop_percent = p_drop_percent;
         results[result_count].timeout_ms = timeout_ms;
         results[result_count].throughput_bps = throughput_bps;
@@ -303,23 +304,23 @@ void run_simulation_with_params(int p_drop_percent, int timeout_ms) {
         results[result_count].dropped_max_retries = total_dropped_max_retries;
         result_count++;
     }
-    
+
     printf("Results: Throughput=%lu bytes/sec, Avg_transmissions=%d.%02d, Dropped_max_retries=%lu\n",
-           (unsigned long)throughput_bps, 
-           avg_transmissions_x100 / 100, 
+           (unsigned long)throughput_bps,
+           avg_transmissions_x100 / 100,
            avg_transmissions_x100 % 100,
            (unsigned long)total_dropped_max_retries);
 }
 
 void analyze_performance() {
     int p_drop_values[] = {1, 2, 4, 8};  // 1%, 2%, 5%, 10%, 15%
-    int timeout_values[] = {150, 175 , 200, 225};  
-    
+    int timeout_values[] = {150, 175 , 200, 225};
+
     printf("\n=== Starting Performance Analysis ===\n");
     printf("Testing %d P_drop values with %d timeout values\n", 5, 5);
-    
+
     result_count = 0;
-    
+
     // Test throughput vs P_drop for different timeouts
     for (int t = 0; t < 5; t++) {
         printf("\n--- Testing Timeout = %d ms ---\n", timeout_values[t]);
@@ -327,16 +328,16 @@ void analyze_performance() {
             run_simulation_with_params(p_drop_values[p], timeout_values[t]);
         }
     }
-    
+
     // Print summary results
     print_analysis_results();
-}
+} */
 
 void print_analysis_results() {
     printf("\n=== Performance Analysis Results ===\n");
     printf("P_drop%% | Timeout(ms) | Throughput(bytes/s) | Avg_TX | Dropped\n");
     printf("--------|-------------|--------------------|---------|---------\n");
-    
+
     for (int i = 0; i < result_count; i++) {
         printf("%6d | %10d | %18lu | %3d.%02d | %7lu\n",
                results[i].p_drop_percent,
@@ -346,12 +347,12 @@ void print_analysis_results() {
                results[i].avg_transmissions_x100 % 100,
                (unsigned long)results[i].dropped_max_retries);
     }
-    
+
     // Find best and worst performance
     uint32_t max_throughput = 0;
     uint32_t min_throughput = 0xFFFFFFFF;
     int best_idx = 0, worst_idx = 0;
-    
+
     for (int i = 0; i < result_count; i++) {
         if (results[i].throughput_bps > max_throughput) {
             max_throughput = results[i].throughput_bps;
@@ -362,12 +363,12 @@ void print_analysis_results() {
             worst_idx = i;
         }
     }
-    
+
     printf("\nBest Performance: P_drop=%d%%, Timeout=%dms, Throughput=%lu bytes/s\n",
            results[best_idx].p_drop_percent,
            results[best_idx].timeout_ms,
            (unsigned long)results[best_idx].throughput_bps);
-    
+
     printf("Worst Performance: P_drop=%d%%, Timeout=%dms, Throughput=%lu bytes/s\n",
            results[worst_idx].p_drop_percent,
            results[worst_idx].timeout_ms,
@@ -744,7 +745,7 @@ void SwitchTask(void *params) {
         if (xQueueReceive(qToSwitch_ForACKs, &ack, pdMS_TO_TICKS(25)) == pdPASS) {
             // ACK dropping with probability P_ACK
             int drop_rand = rand() % P_DROP_SCALE;
-            if (drop_rand < P_ACK_PERCENT) {
+            if (drop_rand < current_p_ack_percent) {
                 printf("Switch: Dropping ACK from=%d to=%d seq=%ld (random ACK loss)\n",
                        ack->from, ack->to, (long)ack->seq);
                 vPortFree(ack);
@@ -783,7 +784,7 @@ void SwitchTask(void *params) {
     int32_t myId = (int32_t)parameters;
     Packet *pkt = NULL;
     BaseType_t status;
-    const TickType_t ticksToWait = pdMS_TO_TICKS(TIMEOUT_PERIOD);
+    const TickType_t ticksToWait = pdMS_TO_TICKS(current_timeout_period);
 
     // Dynamic allocation for sequence tracking
     bool *seenSeq = (bool*)pvPortMalloc(TARGET_RECEIVED_PACKETS * sizeof(bool));
@@ -905,10 +906,10 @@ void SwitchTask(void *params) {
     xTaskCreate(SwitchTask, "Switch", 1024, NULL, 1, NULL);
 
     startTick = xTaskGetTickCount();
-    
+
     // Uncomment to run performance analysis
     // analyze_performance();
-    
+
     vTaskStartScheduler();
 
     return 0;
