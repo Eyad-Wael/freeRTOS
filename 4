@@ -1,7 +1,3 @@
-
-
-
-
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdbool.h>
@@ -89,6 +85,9 @@ typedef struct {
 static Packet pkt_arr[PACKET_ARR];
 static ACK ack_arr[ACK_ARR];
 static BUFFER buf_arr[BUFFER_ARR];
+// Add these to your static variables section
+static Packet *switchBuffer[QUEUE_SIZE];
+static int switchPktCount = 0;
 //static bool             rx3_seenSeq[NO_OF_PACKETS];
 //static bool             rx4_seenSeq[NO_OF_PACKETS];
 static uint32_t         total_transmissions       = 0;
@@ -96,6 +95,7 @@ static uint32_t         total_dropped_max_retries = 0;
 static QueueHandle_t    qToSwitch, qToRx3, qToRx4, qToSwitch_ForACKs, qToSender1, qToSender2;
 static SemaphoreHandle_t stats_mutex;
 static SemaphoreHandle_t buf_mutex;
+static SemaphoreHandle_t switch_mutex;
 static int32_t          total_received     = 0;
 static int32_t          total_lost         = 0;
 static uint32_t         total_bytes_received = 0;
@@ -228,21 +228,21 @@ void SenderTimerCallback(TimerHandle_t xTimer) {
         printf("Sender %d: No available packets in pool\n", state->myId);
         return;
     }
-    
+
     // Clear packet data
     memset(pkt, 0, sizeof(Packet));
     pkt->in_use = 1;
-    
+
     pkt->from = state->myId;
     pkt->to = (rand() % 2 == 0) ? 3 : 4;
-    
+
     // Generate random packet length between L1 and L2 (uniformly distributed)
     int packet_length = L1_BYTES + (rand() % (L2_BYTES - L1_BYTES + 1));
     pkt->size = packet_length;
-    
+
     pkt->retries = 0;
     set_random_packet_data(pkt);
-    
+
     xSemaphoreTake(stats_mutex, portMAX_DELAY);
     if (pkt->to == 3) {
         pkt->seq = state->seq3++;
@@ -253,14 +253,14 @@ void SenderTimerCallback(TimerHandle_t xTimer) {
     xSemaphoreGive(stats_mutex);
 
     if (xQueueSend(qToSwitch, &pkt, 0) == pdPASS) {
-        printf("Sender %d: sent to switch: to=%d seq=%ld size=%d data=\"%s\"\n", 
+        printf("Sender %d: sent to switch: to=%d seq=%ld size=%d data=\"%s\"\n",
                state->myId, pkt->to, (long)pkt->seq, pkt->size, pkt->data);
     } else {
         printf("Sender %d: Could not send to switch queue.\n", state->myId);
         // Return packet to pool
         pkt->in_use = 0;
     }
-    
+
     // Generate random interval between T1_MIN_MS and T2_MAX_MS for next packet
     int next_interval = T1_MIN_MS + (rand() % (T2_MAX_MS - T1_MIN_MS + 1));
     xTimerChangePeriod(xTimer, pdMS_TO_TICKS(next_interval), 0);
@@ -268,12 +268,12 @@ void SenderTimerCallback(TimerHandle_t xTimer) {
 
  void SenderTask(void *parameters) {
     SenderState *state = (SenderState *)parameters;
-    
+
     printf("Sender %d started\n", state->myId);
-    
+
     // Generate initial random interval between T1_MIN_MS and T2_MAX_MS
     int initial_interval = T1_MIN_MS + (rand() % (T2_MAX_MS - T1_MIN_MS + 1));
-    
+
     TimerHandle_t timer = xTimerCreate(
         "SenderTimer",
         pdMS_TO_TICKS(initial_interval),
@@ -281,14 +281,14 @@ void SenderTimerCallback(TimerHandle_t xTimer) {
         (void *)state,
         SenderTimerCallback
     );
-    
+
     if (timer != NULL) {
         xTimerStart(timer, 0);
         printf("Sender %d: Timer started with interval %d ms\n", state->myId, initial_interval);
     } else {
         printf("Sender %d: Failed to create timer\n", state->myId);
     }
-    
+
     while (1) vTaskDelay(portMAX_DELAY);
 }
 
@@ -298,14 +298,14 @@ void SenderTimerCallback(TimerHandle_t xTimer) {
 
     void SwitchTimerCallback(TimerHandle_t xTimer) {
     xSemaphoreTake(switch_mutex, portMAX_DELAY);
-    
+
     for (int i = 0; i < switchPktCount; ++i) {
         Packet *pkt = switchBuffer[i];
-        
+
         // Simulate packet loss
         int drop_rand = rand() % P_DROP_SCALE;
         if (drop_rand < P_DROP_PERCENT) {
-            printf("Switch: Dropping packet from=%d to=%d seq=%ld (random loss)\n", 
+            printf("Switch: Dropping packet from=%d to=%d seq=%ld (random loss)\n",
                    pkt->from, pkt->to, (long)pkt->seq);
             // Return packet to pool
             pkt->in_use = 0;
@@ -315,14 +315,14 @@ void SenderTimerCallback(TimerHandle_t xTimer) {
             CheckAndReportStatsAndStop();
             continue;
         }
-        
+
         // Forward packet to appropriate receiver
         if (pkt->to == 3) {
             if (xQueueSendToBack(qToRx3, &pkt, 0) == pdPASS) {
-                printf("Switch: Forwarded packet to receiver 3 (seq=%ld, size=%d)\n", 
+                printf("Switch: Forwarded packet to receiver 3 (seq=%ld, size=%d)\n",
                        (long)pkt->seq, pkt->size);
             } else {
-                printf("Switch: Queue to receiver 3 full, dropping packet seq=%ld\n", 
+                printf("Switch: Queue to receiver 3 full, dropping packet seq=%ld\n",
                        (long)pkt->seq);
                 pkt->in_use = 0;
                 xSemaphoreTake(stats_mutex, portMAX_DELAY);
@@ -332,10 +332,10 @@ void SenderTimerCallback(TimerHandle_t xTimer) {
             }
         } else if (pkt->to == 4) {
             if (xQueueSendToBack(qToRx4, &pkt, 0) == pdPASS) {
-                printf("Switch: Forwarded packet to receiver 4 (seq=%ld, size=%d)\n", 
+                printf("Switch: Forwarded packet to receiver 4 (seq=%ld, size=%d)\n",
                        (long)pkt->seq, pkt->size);
             } else {
-                printf("Switch: Queue to receiver 4 full, dropping packet seq=%ld\n", 
+                printf("Switch: Queue to receiver 4 full, dropping packet seq=%ld\n",
                        (long)pkt->seq);
                 pkt->in_use = 0;
                 xSemaphoreTake(stats_mutex, portMAX_DELAY);
@@ -345,12 +345,12 @@ void SenderTimerCallback(TimerHandle_t xTimer) {
             }
         } else {
             // Invalid destination
-            printf("Switch: Invalid destination %d, dropping packet seq=%ld\n", 
+            printf("Switch: Invalid destination %d, dropping packet seq=%ld\n",
                    pkt->to, (long)pkt->seq);
             pkt->in_use = 0;
         }
     }
-    
+
     switchPktCount = 0;
     xSemaphoreGive(switch_mutex);
 }
@@ -358,15 +358,15 @@ void SenderTimerCallback(TimerHandle_t xTimer) {
 
 void SwitchTask(void *params) {
     Packet *pkt = NULL;
-    
+
     printf("Switch started\n");
-    
+
     switch_mutex = xSemaphoreCreateMutex();
     if (switch_mutex == NULL) {
         printf("Switch: Failed to create mutex\n");
         return;
     }
-    
+
     TimerHandle_t timer = xTimerCreate(
         "SwitchTimer",
         pdMS_TO_TICKS(PROP_DELAY_MS),
@@ -386,14 +386,14 @@ void SwitchTask(void *params) {
     while (1) {
         if (xQueueReceive(qToSwitch, &pkt, pdMS_TO_TICKS(50)) == pdPASS) {
             xSemaphoreTake(switch_mutex, portMAX_DELAY);
-            
+
             if (switchPktCount < QUEUE_SIZE) {
                 switchBuffer[switchPktCount++] = pkt;
-                printf("Switch: Buffered packet from=%d to=%d seq=%ld size=%d (buffer: %d/%d)\n", 
+                printf("Switch: Buffered packet from=%d to=%d seq=%ld size=%d (buffer: %d/%d)\n",
                        pkt->from, pkt->to, (long)pkt->seq, pkt->size, switchPktCount, QUEUE_SIZE);
             } else {
                 // Buffer full, drop packet
-                printf("Switch: Buffer full (%d/%d), dropping packet from=%d to=%d seq=%ld\n", 
+                printf("Switch: Buffer full (%d/%d), dropping packet from=%d to=%d seq=%ld\n",
                        switchPktCount, QUEUE_SIZE, pkt->from, pkt->to, (long)pkt->seq);
                 pkt->in_use = 0;
                 xSemaphoreTake(stats_mutex, portMAX_DELAY);
@@ -401,7 +401,7 @@ void SwitchTask(void *params) {
                 xSemaphoreGive(stats_mutex);
                 CheckAndReportStatsAndStop();
             }
-            
+
             xSemaphoreGive(switch_mutex);
         }
     }
@@ -443,23 +443,23 @@ void SwitchTask(void *params) {
                     CheckAndReportStatsAndStop();
                 }
             }
-            
-            printf("Receiver %d: Packet received - from=%d seq=%ld size=%d data=\"%s\"\n", 
+
+            printf("Receiver %d: Packet received - from=%d seq=%ld size=%d data=\"%s\"\n",
                    myId, pkt->from, (long)pkt->seq, pkt->size, pkt->data);
-            
+
             expectedSeq = pkt->seq + 1;
-            
+
             // Update statistics
             xSemaphoreTake(stats_mutex, portMAX_DELAY);
             total_received++;
             total_bytes_received += pkt->size;
             xSemaphoreGive(stats_mutex);
-            
+
             // Return packet to pool
             pkt->in_use = 0;
-            
+
             CheckAndReportStatsAndStop();
-            
+
         } else {
             // Timeout occurred - assume packet was lost
             printf("Receiver %d: Timeout - expected seq=%ld (packet lost)\n", myId, (long)expectedSeq);
@@ -497,10 +497,11 @@ void SwitchTask(void *params) {
 
         stats_mutex = xSemaphoreCreateMutex();
            buf_mutex = xSemaphoreCreateMutex();
+           switch_mutex = xSemaphoreCreateMutex();
            configASSERT(stats_mutex);
            configASSERT(buf_mutex);
-        memset(rx3_seenSeq, 0, sizeof(rx3_seenSeq));
-        memset(rx4_seenSeq, 0, sizeof(rx4_seenSeq));
+      //  memset(rx3_seenSeq, 0, sizeof(rx3_seenSeq));
+    //    memset(rx4_seenSeq, 0, sizeof(rx4_seenSeq));
 
         memset(senderStates, 0, sizeof(senderStates));
 
