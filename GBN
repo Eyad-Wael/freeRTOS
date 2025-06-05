@@ -854,53 +854,56 @@ void SenderTask(void *parameters) {
     }
     
     QueueHandle_t myAckQueue = (state->myId == 1) ? qToSender1 : qToSender2;
+    
     while (1) {
-    if (xQueueReceive(myAckQueue, &ack, pdMS_TO_TICKS(50)) == pdPASS) {
+        if (xQueueReceive(myAckQueue, &ack, pdMS_TO_TICKS(50)) == pdPASS) {
 
-        if (state->protocol == PROTOCOL_SEND_AND_WAIT) {
-            // S&W ACK processing
-            printf("Sender %d: S&W - Received ACK for seq=%ld\n", state->myId, (long)ack->seq);
-            
-            xSemaphoreTake(buf_mutex, portMAX_DELAY);
-            int buf_idx = txbuf_find_seq(state, ack->seq);
-            if (buf_idx != -1) {
-                txbuf_remove(state, buf_idx);
-                printf("Sender %d: S&W - Removed packet seq=%ld from buffer\n",
-                       state->myId, (long)ack->seq);
-
-                int next_interval = T1_MIN_MS + (rand() % (T2_MAX_MS - T1_MIN_MS + 1));
-                xTimerChangePeriod(timer, pdMS_TO_TICKS(next_interval), 0);
-            }
-            xSemaphoreGive(buf_mutex);
-
-        } else if (state->protocol == PROTOCOL_GO_BACK_N) {
-            // Hybrid Go-Back-N ACK processing (PUT THE NEW CODE HERE)
-            printf("Sender %d: Hybrid GBN - Received ACK for seq=%ld\n", state->myId, (long)ack->seq);
-            
-            if (ack->seq >= state->send_base) {
-                // Remove timers for all acknowledged packets
+            if (state->protocol == PROTOCOL_SEND_AND_WAIT) {
+                // S&W ACK processing
+                printf("Sender %d: S&W - Received ACK for seq=%ld\n", state->myId, (long)ack->seq);
+                
                 xSemaphoreTake(buf_mutex, portMAX_DELAY);
-                for (int32_t seq = state->send_base; seq <= ack->seq; seq++) {
-                    int buf_idx = txbuf_find_seq(state, seq);
-                    if (buf_idx != -1) {
-                        txbuf_remove(state, buf_idx);
-                        printf("Sender %d: Hybrid GBN - Removed timer for packet seq=%ld\n", 
-                               state->myId, (long)seq);
-                    }
+                int buf_idx = txbuf_find_seq(state, ack->seq);
+                if (buf_idx != -1) {
+                    txbuf_remove(state, buf_idx);
+                    printf("Sender %d: S&W - Removed packet seq=%ld from buffer\n",
+                           state->myId, (long)ack->seq);
+
+                    int next_interval = T1_MIN_MS + (rand() % (T2_MAX_MS - T1_MIN_MS + 1));
+                    xTimerChangePeriod(timer, pdMS_TO_TICKS(next_interval), 0);
                 }
                 xSemaphoreGive(buf_mutex);
+
+            } else if (state->protocol == PROTOCOL_GO_BACK_N) {
+                // Go-Back-N ACK processing
+                printf("Sender %d: GBN - Received ACK for seq=%ld\n", state->myId, (long)ack->seq);
                 
-                state->send_base = ack->seq + 1;
-                printf("Sender %d: Hybrid GBN - Advanced window to %ld\n", 
-                       state->myId, (long)state->send_base);
+                if (ack->seq >= state->send_base) {
+                    // Remove timers for all acknowledged packets
+                    xSemaphoreTake(buf_mutex, portMAX_DELAY);
+                    for (int32_t seq = state->send_base; seq <= ack->seq; seq++) {
+                        int buf_idx = txbuf_find_seq(state, seq);
+                        if (buf_idx != -1) {
+                            txbuf_remove(state, buf_idx);
+                            printf("Sender %d: GBN - Removed timer for packet seq=%ld\n", 
+                                   state->myId, (long)seq);
+                        }
+                    }
+                    xSemaphoreGive(buf_mutex);
+                    
+                    state->send_base = ack->seq + 1;
+                    printf("Sender %d: GBN - Advanced window to %ld\n", 
+                           state->myId, (long)state->send_base);
+                }
             }
+
+            vPortFree(ack);
         }
 
-        vPortFree(ack);
+        vTaskDelay(pdMS_TO_TICKS(10));
     }
-
-    vTaskDelay(pdMS_TO_TICKS(10));
 }
+
 
 
     // ----------------------------------------------------------------------------
@@ -1248,6 +1251,8 @@ void ReceiverTask(void *parameters) {
     switch_mutex = xSemaphoreCreateMutex();
     configASSERT(stats_mutex);
     configASSERT(buf_mutex);
+memset(rx3_seenSeq, 0, sizeof(rx3_seenSeq));
+memset(rx4_seenSeq, 0, sizeof(rx4_seenSeq));
 
     // Initialize sender states based on protocol
     memset(senderStates, 0, sizeof(senderStates));
