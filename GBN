@@ -588,6 +588,8 @@ void SenderTimerCallback_SW(TimerHandle_t xTimer) {
         vPortFree(pkt);
     }
 }
+// ----------------------------------------------------------------------------
+    // Sender GO BACK
 
 void PacketTimeoutCallback_GBN_Hybrid(TimerHandle_t xTimer) {
     int buf_idx = (int)(intptr_t)pvTimerGetTimerID(xTimer);
@@ -664,88 +666,6 @@ void PacketTimeoutCallback_GBN_Hybrid(TimerHandle_t xTimer) {
 
 
 
-void SenderTimerCallback_GBN_Hybrid(TimerHandle_t xTimer) {
-    SenderState *state = (SenderState *)pvTimerGetTimerID(xTimer);
-
-    printf("Sender %d: Hybrid GBN Timer callback\n", state->myId);
-
-    // Send packets to each destination with separate sequence counters
-    int packets_sent = 0;
-    while (packets_sent < 2) {  // Send to both destinations
-        Packet *pkt = (Packet*)pvPortMalloc(sizeof(Packet));
-        if (!pkt) break;
-
-        // Get buffer slot for this packet's timer
-        int buf_idx = get_available_buffer();
-        if (buf_idx == -1) {
-            vPortFree(pkt);
-            break;
-        }
-
-        memset(pkt, 0, sizeof(Packet));
-        pkt->from = state->myId;
-
-        // Alternate between destinations using per-destination sequences
-        if (packets_sent == 0) {
-            pkt->to = 3;
-            pkt->seq = state->seq3++;  // Use per-destination sequence
-        } else {
-            pkt->to = 4;
-            pkt->seq = state->seq4++;  // Use per-destination sequence
-        }
-
-        // Generate random packet length
-        int packet_length = L1_BYTES + (rand() % (L2_BYTES - L1_BYTES + 1));
-        pkt->size = packet_length;
-        set_random_packet_data(pkt);
-
-        // Store in buffer with individual timer (hybrid approach)
-        xSemaphoreTake(buf_mutex, portMAX_DELAY);
-        buf_arr[buf_idx].from = pkt->from;
-        buf_arr[buf_idx].to = pkt->to;
-        buf_arr[buf_idx].seq = pkt->seq;
-        buf_arr[buf_idx].size = pkt->size;
-        buf_arr[buf_idx].retries = 0;
-        strncpy(buf_arr[buf_idx].data, pkt->data, PACKET_DATA_LEN);
-
-        // Create individual timer for each packet (hybrid approach)
-        buf_arr[buf_idx].timer = xTimerCreate(
-            "HybridGBNTimer",
-            pdMS_TO_TICKS(current_timeout_period),
-            pdFALSE,
-            (void*)(intptr_t)buf_idx,
-            PacketTimeoutCallback_GBN_Hybrid
-        );
-
-        if (buf_arr[buf_idx].timer) {
-            xTimerStart(buf_arr[buf_idx].timer, 0);
-        }
-        xSemaphoreGive(buf_mutex);
-
-        // SEND THE PACKET (this was missing!)
-        if (xQueueSend(qToSwitch, &pkt, 0) == pdPASS) {
-            printf("Sender %d: Hybrid GBN - sent packet to=%d seq=%ld size=%d\n",
-                   state->myId, pkt->to, (long)pkt->seq, pkt->size);
-
-            packets_sent++;
-
-            // Update transmission statistics
-            xSemaphoreTake(stats_mutex, portMAX_DELAY);
-            total_transmissions++;
-            xSemaphoreGive(stats_mutex);
-        } else {
-            printf("Sender %d: Hybrid GBN - Could not send to switch queue\n", state->myId);
-            // Clean up on send failure
-            txbuf_remove(state, buf_idx);
-            vPortFree(pkt);
-            break;
-        }
-    }
-
-    // RESCHEDULE TIMER (this was missing!)
-    int next_interval = T1_MIN_MS + (rand() % (T2_MAX_MS - T1_MIN_MS + 1));
-    xTimerChangePeriod(xTimer, pdMS_TO_TICKS(next_interval), 0);
-}
 
 
 void SenderTimerCallback_GBN(TimerHandle_t xTimer) {
@@ -832,6 +752,8 @@ void WindowTimeoutCallback(TimerHandle_t xTimer) {
     xTimerReset(xTimer, 0);
 }
 
+// ----------------------------------------------------------------------------
+    // Sender 
 
 void SenderTimerCallback(TimerHandle_t xTimer) {
     SenderState *state = (SenderState *)pvTimerGetTimerID(xTimer);
@@ -1136,6 +1058,8 @@ void SwitchTask(void *params) {
         }
     }
 }
+ // ----------------------------------------------------------------------------
+    // Receiver GO Back
 void ReceiverTask_GBN(void *parameters) {
     int32_t myId = (int32_t)parameters;
     int32_t expected_seq_sender1 = 0;
@@ -1224,7 +1148,8 @@ void ReceiverTask_GBN(void *parameters) {
         }
     }
 }
-
+ // ----------------------------------------------------------------------------
+    // Receiver 
 
 void ReceiverTask(void *parameters) {
     if (CURRENT_PROTOCOL == PROTOCOL_SEND_AND_WAIT) {
