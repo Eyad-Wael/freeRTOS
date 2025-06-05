@@ -21,9 +21,9 @@
 #include "led.h"
 
 
-#define T1_MIN_MS       100
-#define T2_MAX_MS       200
-#define HEADER_SIZE_BYTES   16
+#define T1_MIN       100  //T1_MIN_MS
+#define T2_MAX       200
+#define HEADER_SIZE   16
 #define L1_BYTES            500
 #define L2_BYTES            1500
 #define K                   40 //ack size
@@ -31,19 +31,17 @@
 #define TIMEOUT_PERIOD      200
 #define MAX_RETRIES         4
 #define C_LINK_CAPACITY     100000
-#define PROP_DELAY_MS       5
-//#define P_DROP_PERCENT      1
+#define PROP_DELAY       5
+#define P_DROP_PERCENT      1
 #define P_DROP_SCALE        100
-//#define P_ACK_PERCENT       1
+#define P_ACK_PERCENT       1
 #define QUEUE_SIZE          40
 #define PACKET_DATA_LEN     20
-//#define NO_OF_PACKETS       100
-//#define MAX_NO_OF_PACKETS   100
-#define TX_BUFFER_SIZE 		20
+#define NO_OF_PACKETS       100
+#define SEND_BUFFER_SIZE 		20
 #define PACKET_ARR 400
 #define ACK_ARR 200
 #define BUFFER_ARR 200
-#define TARGET_RECEIVED_PACKETS 20
 #define CURRENT_PROTOCOL PROTOCOL_SEND_AND_WAIT
 //#define CURRENT_PROTOCOL PROTOCOL_GO_BACK_N
 
