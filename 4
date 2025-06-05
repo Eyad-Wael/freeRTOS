@@ -2,11 +2,6 @@
 
 
 
-
-
-
-
-
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdbool.h>
@@ -25,8 +20,8 @@
 #include "led.h"
 
 
-#define T1_MIN_MS       50   
-#define T2_MAX_MS       150 
+#define T1_MIN_MS       50
+#define T2_MAX_MS       150
 #define HEADER_SIZE_BYTES   16
 #define L1_BYTES            500
 #define L2_BYTES            1500
@@ -56,7 +51,7 @@ typedef struct {
     int32_t from, to;
     int32_t seq;
     int16_t size, retries;
-    
+
     char    data[PACKET_DATA_LEN];
 uint8_t in_use;
 } Packet;
@@ -71,9 +66,14 @@ uint8_t in_use;
 
 
 typedef struct {
-    Packet* pkt;
+	int32_t from, to;
+	    int32_t seq;
+	    int16_t size, retries;
+
+	    char    data[PACKET_DATA_LEN];
+	uint8_t in_use;
     TimerHandle_t timer;
-    
+
 } BUFFER;
 
 
@@ -86,9 +86,9 @@ typedef struct {
 
 // ----------------------------------------------------------------------------
 //  Variables
-static Packet pkt_arr[PACKET_ARR]=0;
-static ACK ack_arr[ACK_ARR]=0;
-static BUFFER buf_arr[BUFFER_ARR]=0;
+static Packet pkt_arr[PACKET_ARR];
+static ACK ack_arr[ACK_ARR];
+static BUFFER buf_arr[BUFFER_ARR];
 //static bool             rx3_seenSeq[NO_OF_PACKETS];
 //static bool             rx4_seenSeq[NO_OF_PACKETS];
 static uint32_t         total_transmissions       = 0;
@@ -114,29 +114,28 @@ const char* message_pool[] = {
 
 int txbuf_find_seq(SenderState *state, int32_t seq) {
     for (int i = 0; i < BUFFER_ARR; ++i) {
-        if (buf_arr[i].in_use && buf_arr[i].pkt && buf_arr[i].pkt->seq == seq) {
+        if (buf_arr[i].in_use && buf_arr[i].seq == seq) {
             return i;
         }
     }
     return -1;
 }
 
+
 void txbuf_remove(SenderState *state, int idx) {
     if (buf_arr[idx].timer) {
-        TimerInfo *info = (TimerInfo *) pvTimerGetTimerID(buf_arr[idx].timer);
         xTimerStop(buf_arr[idx].timer, 0);
         xTimerDelete(buf_arr[idx].timer, 0);
-        if (info) vPortFree(info);
     }
-    
-    if (buf_arr[idx].pkt) {
-        buf_arr[idx].pkt->in_use = 0;  // Mark packet as available in pool
-        buf_arr[idx].pkt = NULL;
+    memset(buf_arr[idx].data, 0, PACKET_DATA_LEN);
+        buf_arr[idx].from = 0;
+        buf_arr[idx].to = 0;
+        buf_arr[idx].seq = 0;
+        buf_arr[idx].size = 0;
+        buf_arr[idx].retries = 0;
+        buf_arr[idx].timer = NULL;
+        buf_arr[idx].in_use = 0;  // Mark buffer slot as available
     }
-    
-    buf_arr[idx].timer = NULL;
-    buf_arr[idx].in_use = 0;  // Mark buffer slot as available
-}
 
 // Function to get an available packet from the pool
 Packet* get_available_packet() {
@@ -146,7 +145,7 @@ Packet* get_available_packet() {
             return &pkt_arr[i];
         }
     }
-    return NULL;  
+    return NULL;
 }
 
 // Function to get an available buffer slot
@@ -157,7 +156,7 @@ int get_available_buffer() {
             return i;
         }
     }
-    return -1;  
+    return -1;
 }
 
 
@@ -193,7 +192,7 @@ static void print_final_stats(void) {
 
     uint32_t throughput_bps = ((uint32_t)total_bytes_received * (uint32_t)configTICK_RATE_HZ) / (uint32_t)deltaTicks;
     printf("Throughput = %lu bytes/sec\n", (unsigned long)throughput_bps);
-    
+
     uint32_t avg_transmissions_per_packet = 0;
     if (total_received > 0) {
         avg_transmissions_per_packet = total_transmissions / total_received;
@@ -220,16 +219,19 @@ static void CheckAndReportStatsAndStop(void) {
 
     // ----------------------------------------------------------------------------
     // Sender
-
- void SenderTimerCallback(TimerHandle_t xTimer) {
+void SenderTimerCallback(TimerHandle_t xTimer) {
     SenderState *state = (SenderState *)pvTimerGetTimerID(xTimer);
 
-    // Get packet from pool instead of malloc
+    // Get packet from pool
     Packet *pkt = get_available_packet();
     if (!pkt) {
-        printf("Sender: No available packets in pool\n");
+        printf("Sender %d: No available packets in pool\n", state->myId);
         return;
     }
+    
+    // Clear packet data
+    memset(pkt, 0, sizeof(Packet));
+    pkt->in_use = 1;
     
     pkt->from = state->myId;
     pkt->to = (rand() % 2 == 0) ? 3 : 4;
@@ -247,42 +249,46 @@ static void CheckAndReportStatsAndStop(void) {
     } else {
         pkt->seq = state->seq4++;
     }
+    total_transmissions++;
     xSemaphoreGive(stats_mutex);
 
     if (xQueueSend(qToSwitch, &pkt, 0) == pdPASS) {
-        printf("Sender: sent to switch: from=%d to=%d seq=%ld size=%d data=\"%s\"\n", 
-               pkt->from, pkt->to, (long)pkt->seq, pkt->size, pkt->data);
+        printf("Sender %d: sent to switch: to=%d seq=%ld size=%d data=\"%s\"\n", 
+               state->myId, pkt->to, (long)pkt->seq, pkt->size, pkt->data);
     } else {
-        printf("Sender: Could not send to switch queue.\n");
-        // Return packet to pool instead of vPortFree
+        printf("Sender %d: Could not send to switch queue.\n", state->myId);
+        // Return packet to pool
         pkt->in_use = 0;
     }
     
-    // Generate random interval between T1 and T2 for next packet (uniformly distributed)
-    int T1_MIN = 50;  // minimum interval in ms
-    int T2_MAX = 150; // maximum interval in ms
-    int next_interval = T1_MIN + (rand() % (T2_MAX - T1_MIN + 1));
+    // Generate random interval between T1_MIN_MS and T2_MAX_MS for next packet
+    int next_interval = T1_MIN_MS + (rand() % (T2_MAX_MS - T1_MIN_MS + 1));
     xTimerChangePeriod(xTimer, pdMS_TO_TICKS(next_interval), 0);
 }
 
-  void SenderTask(void *parameters) {
+ void SenderTask(void *parameters) {
     SenderState *state = (SenderState *)parameters;
     
-    // Generate initial random interval between T1 and T2
-    int T1_MIN = 50;  // minimum interval in ms
-    int T2_MAX = 150; // maximum interval in ms
-    int initial_interval = T1_MIN + (rand() % (T2_MAX - T1_MIN + 1));
+    printf("Sender %d started\n", state->myId);
+    
+    // Generate initial random interval between T1_MIN_MS and T2_MAX_MS
+    int initial_interval = T1_MIN_MS + (rand() % (T2_MAX_MS - T1_MIN_MS + 1));
     
     TimerHandle_t timer = xTimerCreate(
         "SenderTimer",
         pdMS_TO_TICKS(initial_interval),
-        pdFALSE,  // Changed to pdFALSE since we manually set intervals
+        pdFALSE,  // Not auto-reload since we manually set intervals
         (void *)state,
         SenderTimerCallback
     );
+    
     if (timer != NULL) {
         xTimerStart(timer, 0);
+        printf("Sender %d: Timer started with interval %d ms\n", state->myId, initial_interval);
+    } else {
+        printf("Sender %d: Failed to create timer\n", state->myId);
     }
+    
     while (1) vTaskDelay(portMAX_DELAY);
 }
 
@@ -292,11 +298,16 @@ static void CheckAndReportStatsAndStop(void) {
 
     void SwitchTimerCallback(TimerHandle_t xTimer) {
     xSemaphoreTake(switch_mutex, portMAX_DELAY);
+    
     for (int i = 0; i < switchPktCount; ++i) {
         Packet *pkt = switchBuffer[i];
+        
+        // Simulate packet loss
         int drop_rand = rand() % P_DROP_SCALE;
         if (drop_rand < P_DROP_PERCENT) {
-            // Return packet to pool instead of vPortFree
+            printf("Switch: Dropping packet from=%d to=%d seq=%ld (random loss)\n", 
+                   pkt->from, pkt->to, (long)pkt->seq);
+            // Return packet to pool
             pkt->in_use = 0;
             xSemaphoreTake(stats_mutex, portMAX_DELAY);
             total_lost++;
@@ -304,12 +315,15 @@ static void CheckAndReportStatsAndStop(void) {
             CheckAndReportStatsAndStop();
             continue;
         }
+        
+        // Forward packet to appropriate receiver
         if (pkt->to == 3) {
             if (xQueueSendToBack(qToRx3, &pkt, 0) == pdPASS) {
-                printf("Switch: forwarded packet to receiver %d (seq=%ld, size=%d)\n", 
-                       pkt->to, (long)pkt->seq, pkt->size);
+                printf("Switch: Forwarded packet to receiver 3 (seq=%ld, size=%d)\n", 
+                       (long)pkt->seq, pkt->size);
             } else {
-                // Queue full, drop packet
+                printf("Switch: Queue to receiver 3 full, dropping packet seq=%ld\n", 
+                       (long)pkt->seq);
                 pkt->in_use = 0;
                 xSemaphoreTake(stats_mutex, portMAX_DELAY);
                 total_lost++;
@@ -318,10 +332,11 @@ static void CheckAndReportStatsAndStop(void) {
             }
         } else if (pkt->to == 4) {
             if (xQueueSendToBack(qToRx4, &pkt, 0) == pdPASS) {
-                printf("Switch: forwarded packet to receiver %d (seq=%ld, size=%d)\n", 
-                       pkt->to, (long)pkt->seq, pkt->size);
+                printf("Switch: Forwarded packet to receiver 4 (seq=%ld, size=%d)\n", 
+                       (long)pkt->seq, pkt->size);
             } else {
-                // Queue full, drop packet
+                printf("Switch: Queue to receiver 4 full, dropping packet seq=%ld\n", 
+                       (long)pkt->seq);
                 pkt->in_use = 0;
                 xSemaphoreTake(stats_mutex, portMAX_DELAY);
                 total_lost++;
@@ -329,17 +344,29 @@ static void CheckAndReportStatsAndStop(void) {
                 CheckAndReportStatsAndStop();
             }
         } else {
-            // Invalid destination, drop packet
+            // Invalid destination
+            printf("Switch: Invalid destination %d, dropping packet seq=%ld\n", 
+                   pkt->to, (long)pkt->seq);
             pkt->in_use = 0;
         }
     }
+    
     switchPktCount = 0;
     xSemaphoreGive(switch_mutex);
 }
 
+
 void SwitchTask(void *params) {
     Packet *pkt = NULL;
+    
+    printf("Switch started\n");
+    
     switch_mutex = xSemaphoreCreateMutex();
+    if (switch_mutex == NULL) {
+        printf("Switch: Failed to create mutex\n");
+        return;
+    }
+    
     TimerHandle_t timer = xTimerCreate(
         "SwitchTimer",
         pdMS_TO_TICKS(PROP_DELAY_MS),
@@ -348,25 +375,33 @@ void SwitchTask(void *params) {
         SwitchTimerCallback
     );
 
-    if (timer != NULL) xTimerStart(timer, 0);
+    if (timer != NULL) {
+        xTimerStart(timer, 0);
+        printf("Switch: Timer started with %d ms propagation delay\n", PROP_DELAY_MS);
+    } else {
+        printf("Switch: Failed to create timer\n");
+        return;
+    }
 
     while (1) {
         if (xQueueReceive(qToSwitch, &pkt, pdMS_TO_TICKS(50)) == pdPASS) {
             xSemaphoreTake(switch_mutex, portMAX_DELAY);
+            
             if (switchPktCount < QUEUE_SIZE) {
                 switchBuffer[switchPktCount++] = pkt;
-                printf("Switch: buffered packet from=%d to=%d seq=%ld size=%d\n", 
-                       pkt->from, pkt->to, (long)pkt->seq, pkt->size);
+                printf("Switch: Buffered packet from=%d to=%d seq=%ld size=%d (buffer: %d/%d)\n", 
+                       pkt->from, pkt->to, (long)pkt->seq, pkt->size, switchPktCount, QUEUE_SIZE);
             } else {
                 // Buffer full, drop packet
-                printf("Switch: buffer full, dropping packet from=%d to=%d seq=%ld\n", 
-                       pkt->from, pkt->to, (long)pkt->seq);
+                printf("Switch: Buffer full (%d/%d), dropping packet from=%d to=%d seq=%ld\n", 
+                       switchPktCount, QUEUE_SIZE, pkt->from, pkt->to, (long)pkt->seq);
                 pkt->in_use = 0;
                 xSemaphoreTake(stats_mutex, portMAX_DELAY);
                 total_lost++;
                 xSemaphoreGive(stats_mutex);
                 CheckAndReportStatsAndStop();
             }
+            
             xSemaphoreGive(switch_mutex);
         }
     }
@@ -376,7 +411,7 @@ void SwitchTask(void *params) {
     // ----------------------------------------------------------------------------
     // Receiver
 
-   void ReceiverTask(void *parameters) {
+  void ReceiverTask(void *parameters) {
     int32_t myId = (int32_t)parameters;
     Packet *pkt = NULL;
     BaseType_t status;
@@ -386,10 +421,15 @@ void SwitchTask(void *params) {
     printf("Receiver %d started\n", myId);
 
     while (1) {
+        // Receive packet from appropriate queue
         if (myId == 3) {
             status = xQueueReceive(qToRx3, &pkt, ticksToWait);
-        } else {
+        } else if (myId == 4) {
             status = xQueueReceive(qToRx4, &pkt, ticksToWait);
+        } else {
+            printf("Receiver %d: Invalid receiver ID\n", myId);
+            vTaskDelay(pdMS_TO_TICKS(1000));
+            continue;
         }
 
         if (status == pdPASS) {
@@ -419,6 +459,7 @@ void SwitchTask(void *params) {
             pkt->in_use = 0;
             
             CheckAndReportStatsAndStop();
+            
         } else {
             // Timeout occurred - assume packet was lost
             printf("Receiver %d: Timeout - expected seq=%ld (packet lost)\n", myId, (long)expectedSeq);
