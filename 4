@@ -3,6 +3,7 @@
 
 
 
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdbool.h>
@@ -37,13 +38,13 @@
 #define P_ACK_PERCENT       1
 #define QUEUE_SIZE          40
 #define PACKET_DATA_LEN     20
-#define NO_OF_PACKETS       100
+//#define NO_OF_PACKETS       100
 //#define MAX_NO_OF_PACKETS   100
 #define TX_BUFFER_SIZE 		20
 #define PACKET_ARR 400
 #define ACK_ARR 200
 #define BUFFER_ARR 200
-#define TARGET_RECEIVED_PACKETS 2000
+#define TARGET_RECEIVED_PACKETS 100
 
 // ----------------------------------------------------------------------------
 // Type Definitions
@@ -80,7 +81,7 @@ typedef struct {
 typedef struct {
     int32_t myId;
     int32_t seq3, seq4;
-    bool seenSeq[TARGET_RECEIVED_PACKETS]; 
+    bool seenSeq[TARGET_RECEIVED_PACKETS];
 } SenderState;
 
 
@@ -196,7 +197,7 @@ static void set_random_packet_data(Packet* pkt) {
 void analyze_performance() {
     float p_drop_values[] = {0.005, 0.01, 0.02, 0.05, 0.1};
     int timeout_values[] = {100, 150, 200, 250, 300};
-    
+
     // Test throughput vs P_drop for different timeouts
     for (int t = 0; t < 5; t++) {
         for (int p = 0; p < 5; p++) {
@@ -630,7 +631,7 @@ void SwitchTask(void *params) {
     Packet *pkt = NULL;
     BaseType_t status;
     const TickType_t ticksToWait = pdMS_TO_TICKS(TIMEOUT_PERIOD);
-    
+
     // Dynamic allocation for sequence tracking
     bool *seenSeq = (bool*)pvPortMalloc(TARGET_RECEIVED_PACKETS * sizeof(bool));
     if (!seenSeq) {
@@ -663,7 +664,7 @@ void SwitchTask(void *params) {
             if (pkt->seq < TARGET_RECEIVED_PACKETS) {
                 if (seenSeq[pkt->seq]) {
                     isDuplicate = true;
-                    printf("Receiver %d: Duplicate packet seq=%ld (ignoring for throughput)\n", 
+                    printf("Receiver %d: Duplicate packet seq=%ld (ignoring for throughput)\n",
                            myId, (long)pkt->seq);
                 } else {
                     seenSeq[pkt->seq] = true;
@@ -702,7 +703,7 @@ void SwitchTask(void *params) {
             vPortFree(pkt);
         }
     }
-    
+
     // This should never be reached, but clean up if it does
     vPortFree(seenSeq);
 }
@@ -713,14 +714,14 @@ void SwitchTask(void *params) {
     // Setup
 
     static void setupQueues(void) {
-    	 static void setupQueues(void) {
+
     qToSwitch = xQueueCreate(QUEUE_SIZE, sizeof(Packet *));
-    qToSwitch_ForACKs = xQueueCreate(QUEUE_SIZE, sizeof(ACK *));  
+    qToSwitch_ForACKs = xQueueCreate(QUEUE_SIZE, sizeof(ACK *));
     qToRx3 = xQueueCreate(QUEUE_SIZE, sizeof(Packet *));
     qToRx4 = xQueueCreate(QUEUE_SIZE, sizeof(Packet *));
-    qToSender1 = xQueueCreate(QUEUE_SIZE, sizeof(ACK *));        
-    qToSender2 = xQueueCreate(QUEUE_SIZE, sizeof(ACK *));        
-}
+    qToSender1 = xQueueCreate(QUEUE_SIZE, sizeof(ACK *));
+    qToSender2 = xQueueCreate(QUEUE_SIZE, sizeof(ACK *));
+
 
     	    configASSERT(qToSwitch);
     	    configASSERT(qToSwitch_ForACKs);
