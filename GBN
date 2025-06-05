@@ -711,6 +711,7 @@ void SenderTimerCallback_GBN(TimerHandle_t xTimer) {
     int next_interval = T1_MIN_MS + (rand() % (T2_MAX_MS - T1_MIN_MS + 1));
     xTimerChangePeriod(xTimer, pdMS_TO_TICKS(next_interval), 0);
 }
+
 void WindowTimeoutCallback(TimerHandle_t xTimer) {
     SenderState *state = (SenderState *)pvTimerGetTimerID(xTimer);
 
@@ -743,16 +744,16 @@ void WindowTimeoutCallback(TimerHandle_t xTimer) {
     // Restart window timer
     xTimerReset(xTimer, 0);
 }
-
 void SenderTimerCallback(TimerHandle_t xTimer) {
     SenderState *state = (SenderState *)pvTimerGetTimerID(xTimer);
-
+    
     if (state->protocol == PROTOCOL_SEND_AND_WAIT) {
         SenderTimerCallback_SW(xTimer);
     } else if (state->protocol == PROTOCOL_GO_BACK_N) {
-        SenderTimerCallback_GBN_Hybrid(xTimer);
+        SenderTimerCallback_GBN(xTimer);  // Change from GBN_Hybrid to GBN
     }
 }
+
 
 
 void SenderTask(void *parameters) {
